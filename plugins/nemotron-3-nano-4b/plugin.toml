@@ -1,0 +1,116 @@
+[plugin]
+name = "nemotron-3-nano-4b"
+display_name = "Nemotron 3 Nano 4B"
+description = "NVIDIA's Nemotron 3 Nano 4B, a hybrid Mamba-2/Transformer edge model (4 attention layers of 42 total) purpose-built for Jetson/RTX/DGX Spark. vLLM BF16/FP8 variants for that class of hardware, plus a llama.cpp Q4_K_M GGUF variant (~2.8 GiB) that also fits on small consumer GPUs"
+docs_url = "https://huggingface.co/blog/nvidia/nemotron-3-nano-4b"
+schema_version = 1
+
+[source]
+repo_url = "https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16"
+
+# No [provision] section: `vllm serve` auto-downloads the checkpoint into the
+# named HF cache volume below on first container start.
+# No [[patch]] entries and no [fallback]: this is a bare `vllm serve` command
+# with no wrapper script, dynamic host-path resolution, or entrypoint
+# chaining -- fully expressible via [docker] below, same shape as the Ornith
+# plugin.
+
+[docker]
+mode = "docker-run"
+# NVIDIA's own model card calls out this NGC image specifically for
+# Jetson Thor / DGX Spark (GB10 Grace Blackwell, aarch64) -- the public
+# `vllm/vllm-openai` image on Docker Hub is x86_64-only.
+image = "nvcr.io/nvidia/vllm:26.02-py3"
+container_name = "nemotron-3-nano-4b"
+network_mode = "bridge"
+gpus = "all"
+# ipc = "host" already gives the container the host's shared memory, so no
+# separate shm_size is set -- podman (this host's `docker` CLI emulation)
+# rejects --shm-size together with --ipc host outright, where Docker just
+# silently ignores it.
+ipc = "host"
+volumes = ["dgx-hub-nemotron3-nano-hf-cache:/root/.cache/huggingface"]
+env_passthrough = ["HF_TOKEN"]
+ports = [{ container_port = 8888, publish_strategy = "loopback-remap" }]
+# --mamba_ssm_cache_dtype float32 is required for this hybrid architecture's
+# Mamba-2 layers (NVIDIA's documented flag). The upstream recommended command
+# also adds --enable-auto-tool-choice --tool-call-parser qwen3_coder
+# --reasoning-parser-plugin nano_v3_reasoning_parser.py --reasoning-parser
+# nano_v3 -- the parser plugin is a standalone .py file from the HF repo, not
+# baked into this image, so it's left out of the default command rather than
+# referencing a path that doesn't exist in the container. If your vLLM build
+# already bundles a nano_v3 reasoning parser (or you've mounted the file
+# yourself via a custom image), add those flags through EXTRA_ARGS below.
+command_args = [
+  "vllm", "serve", "nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16",
+  "--served-model-name", "nemotron-3-nano-4b",
+  "--host", "0.0.0.0",
+  "--port", "8888",
+  "--trust-remote-code",
+  "--tensor-parallel-size", "1",
+  "--max-num-seqs", "8",
+  "--max-model-len", "262144",
+  "--mamba_ssm_cache_dtype", "float32",
+]
+
+[[variant]]
+id = "bf16"
+label = "BF16 (default, broadest compatibility)"
+default = true
+# inherits [docker] as-is
+
+[[variant]]
+id = "fp8"
+label = "FP8 (NVIDIA's recommended production quant for DGX Spark/Jetson Thor, ~1.8x latency/throughput vs BF16)"
+docker_overrides = { command_args = [
+  "vllm", "serve", "nvidia/NVIDIA-Nemotron-3-Nano-4B-FP8",
+  "--served-model-name", "nemotron-3-nano-4b-fp8",
+  "--host", "0.0.0.0",
+  "--port", "8888",
+  "--trust-remote-code",
+  "--tensor-parallel-size", "1",
+  "--max-num-seqs", "8",
+  "--max-model-len", "262144",
+  "--mamba_ssm_cache_dtype", "float32",
+  "--kv-cache-dtype", "fp8",
+] }
+
+[[variant]]
+id = "gguf"
+label = "GGUF Q4_K_M via llama.cpp (~2.8 GiB, fits small consumer GPUs; no tool-calling/reasoning-trace parsing)"
+docker_overrides = { image = "ghcr.io/ggml-org/llama.cpp:server-cuda", command_args = [
+  "-hf", "nvidia/NVIDIA-Nemotron-3-Nano-4B-GGUF:Q4_K_M",
+  "--host", "0.0.0.0",
+  "--port", "8888",
+  "--alias", "nemotron-3-nano-4b-gguf",
+  "-ngl", "999",
+  "-c", "8192",
+] }
+# NemotronH (hybrid Mamba-2/Transformer) support landed in llama.cpp fairly
+# recently (ggml-org/llama.cpp#18058) -- the floating `server-cuda` tag is
+# used deliberately here rather than a pinned build number, since an older
+# pinned build may predate that merge. `-hf` downloads and caches the GGUF
+# into the same HF cache volume as the vLLM variants (this image's HOME is
+# /root, same huggingface_hub cache layout). -c 8192 is a conservative
+# default context to leave VRAM headroom on small GPUs; raise it via
+# EXTRA_ARGS if your card has room (NVIDIA's own example uses -c 0, i.e. the
+# model's full trained context).
+
+[health]
+url = "http://{backend_address}/health"
+interval_seconds = 3
+timeout_seconds = 5
+startup_grace_seconds = 30
+expected_first_boot_seconds = 600
+
+[resources]
+# ~8 GiB BF16 weights (~4 GiB for FP8) plus image layers; a 4B model is
+# deliberately light -- good for a quick smoke test of the CLI itself.
+min_free_disk_gib = 20
+min_free_memory_gib = 16
+gpu_required = true
+
+[env.EXTRA_ARGS]
+type = "string"
+default = ""
+description = "Free-form escape hatch appended after the baked-in serve flags for whichever variant is selected (both vllm's and llama-server's arg parsers take the last occurrence of a repeated flag, so this also overrides defaults above, e.g. '--max-model-len 32768' for bf16/fp8 or '-c 32768' for gguf)"
