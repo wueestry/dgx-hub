@@ -1,11 +1,4 @@
-"""Turns a declarative [docker] manifest spec into an actual `docker run` argv.
-
-This is what makes the "generic plugin shape" actually generic: instead of
-shelling out to each repo's own wrapper script, the CLI builds and issues
-the `docker run` invocation itself — which is also what lets it own port
-mapping directly for bridge-networked containers, with no need to patch an
-upstream script to unlock concurrent multi-model serving.
-"""
+"""Turns a declarative [docker] manifest spec into an actual `docker run` argv."""
 
 from __future__ import annotations
 

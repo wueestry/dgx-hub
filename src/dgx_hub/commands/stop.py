@@ -1,8 +1,4 @@
-"""`dgx-hub stop` — stop one or more running models.
-
-Always goes through the generic `docker_adapter.stop`, which mirrors each
-reference repo's own SIGTERM-then-SIGKILL semantics — never plugin-specific.
-"""
+"""`dgx-hub stop` — stop one or more running models."""
 
 from __future__ import annotations
 

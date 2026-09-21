@@ -1,9 +1,4 @@
-"""On-disk state persistence for running models.
-
-Necessary because the CLI process that ran `start` typically exits before a
-later `status`/`stop` invocation — state must be recoverable from disk, not
-held in memory. Written atomically (temp file + os.replace).
-"""
+"""On-disk state persistence for running models."""
 
 from __future__ import annotations
 

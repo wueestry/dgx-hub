@@ -1,5 +1,5 @@
 [plugin]
-name = "qwen3-27b-sglang"
+name = "qwen3.8-27b-sglang"
 display_name = "Qwen3.8-27B (SGLang)"
 description = "SGLang server, NVFP4 quant, with EAGLE/MTP, DSpark, and DFlash2 speculative-decoding variants"
 docs_url = "https://github.com/MiaAI-Lab/Qwen3.8-27B-SGLang-DGX-Spark"

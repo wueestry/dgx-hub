@@ -1,7 +1,4 @@
-"""`dgx-hub start` — provision (if needed) and launch one or more models.
-
-Phase 1 scope: plain rich printing, no live dashboard yet (that's Phase 2).
-"""
+"""`dgx-hub start` — provision (if needed) and launch one or more models."""
 
 from __future__ import annotations
 

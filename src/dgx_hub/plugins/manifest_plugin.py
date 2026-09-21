@@ -1,10 +1,4 @@
-"""ManifestPlugin: turns a parsed plugin.toml into a working ModelPlugin.
-
-Satisfies the `ModelPlugin` protocol purely by rendering the manifest's
-declarative sections (`[provision]`, `[docker]`, `[[variant]]`) into actual
-subprocess/docker invocations. `stop`/`status`/`logs` are intentionally
-absent — those are always `docker_adapter.py` functions.
-"""
+"""ManifestPlugin: turns a parsed plugin.toml into a working ModelPlugin."""
 
 from __future__ import annotations
 
