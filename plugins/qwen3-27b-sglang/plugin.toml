@@ -1,0 +1,87 @@
+[plugin]
+name = "qwen3-27b-sglang"
+display_name = "Qwen3.8-27B (SGLang)"
+description = "SGLang server, NVFP4 quant, with EAGLE/MTP, DSpark, and DFlash2 speculative-decoding variants"
+docs_url = "https://github.com/MiaAI-Lab/Qwen3.8-27B-SGLang-DGX-Spark"
+schema_version = 1
+
+[source]
+repo_url = "https://github.com/MiaAI-Lab/Qwen3.8-27B-SGLang-DGX-Spark.git"
+
+# No [provision] section: weights auto-download into the named volume below
+# on first container start — this repo has no separate download step.
+# No [[patch]] entries: fully declarable via [docker] below.
+
+[docker]
+mode = "docker-run"
+image = "lmsysorg/sglang:qwen38-27b"
+container_name = "qwen3.8-27b-sglang"
+network_mode = "bridge"
+gpus = "all"
+shm_size = "16gb"
+volumes = ["dgx-hub-sglang-hf-cache:/root/.cache/huggingface"]
+env_passthrough = ["HF_TOKEN"]
+ports = [{ container_port = 8888, publish_strategy = "loopback-remap" }]
+command_args = []
+
+[[variant]]
+id = "eagle"
+label = "EAGLE / MTP speculative decoding (default, best for long-form writing)"
+default = true
+# inherits [docker] as-is
+
+[[variant]]
+id = "dspark"
+label = "DSpark block-7 drafting (code/math, ~51.5 tok/s)"
+docker_overrides = { command_args = ["--speculative-algorithm", "DSPARK", "--mem-fraction-static", "0.90"] }
+
+[[variant]]
+id = "dflash"
+label = "DFlash2 block-diffusion (balanced, ~50.9/25.4 tok/s)"
+docker_overrides = { image = "lmsysorg/sglang:dev-qwen38-27b-dflash2", command_args = ["--enable-torch-compile"] }
+
+[health]
+url = "http://{backend_address}/v1/models"
+interval_seconds = 2
+timeout_seconds = 5
+startup_grace_seconds = 45
+expected_first_boot_seconds = 300
+
+[resources]
+min_free_disk_gib = 30
+min_free_memory_gib = 40
+gpu_required = true
+
+[env.QUANT]
+type = "enum"
+choices = ["nvfp4", "fp8"]
+default = "nvfp4"
+description = "Quantization mode"
+
+[env.CONTEXT_LENGTH]
+type = "integer"
+default = 131072
+description = "Max context length (262144 max without YaRN)"
+
+[env.YARN]
+type = "boolean"
+default = false
+description = "Enable YaRN context extension"
+
+[env.MAX_CONCURRENT_REQUESTS]
+type = "integer"
+default = 10
+
+[env.CPUSET]
+type = "string"
+default = ""
+description = "CPU core pinning, e.g. '5-9,15-19' (DGX Spark / GB10 specific)"
+
+[env.EXTRA_ARGS]
+type = "string"
+default = ""
+description = "Free-form escape hatch appended to the sglang launch args"
+
+[[env.validation]]
+rule = "not (YARN and variant in ('dspark', 'dflash') and CONTEXT_LENGTH > 262144)"
+message = "YaRN is incompatible with DSpark/DFlash2 at context lengths above 262144"
