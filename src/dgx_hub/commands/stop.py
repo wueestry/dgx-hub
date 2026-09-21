@@ -6,7 +6,6 @@ import typer
 from rich.console import Console
 
 from dgx_hub import docker_adapter
-from dgx_hub.plugins.base import ContainerHandle, RuntimeKind
 from dgx_hub.process import state as state_store
 
 console = Console()
@@ -36,9 +35,7 @@ def stop_models(
             console.print(f"[yellow]{name}: no state on record, nothing to stop[/yellow]")
             continue
 
-        handle = ContainerHandle(
-            kind=RuntimeKind.DOCKER_RUN, container_name=record.container_name
-        )
+        handle = record.to_handle()
         console.print(f"[bold]{name}[/bold]: stopping (timeout={timeout}s)...")
         try:
             docker_adapter.stop(handle, grace_seconds=timeout)

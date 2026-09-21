@@ -11,14 +11,14 @@ from pydantic import ValidationError
 from dgx_hub.plugins.manifest import PluginManifest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-SGLANG_MANIFEST = REPO_ROOT / "plugins" / "qwen3-27b-sglang" / "plugin.toml"
+SGLANG_MANIFEST = REPO_ROOT / "plugins" / "qwen3.8-27b-sglang" / "plugin.toml"
 
 
 def test_sglang_manifest_parses_and_validates() -> None:
     raw = tomllib.loads(SGLANG_MANIFEST.read_text())
     manifest = PluginManifest.from_toml_dict(raw)
 
-    assert manifest.plugin.name == "qwen3-27b-sglang"
+    assert manifest.plugin.name == "qwen3.8-27b-sglang"
     assert [v.id for v in manifest.variant] == ["eagle", "dspark", "dflash"]
     assert manifest.default_variant_id() == "eagle"
     assert manifest.env["QUANT"].default == "nvfp4"
@@ -98,6 +98,36 @@ def test_patch_requires_exactly_one_kind() -> None:
     data["patch"] = [{"file": "start.sh", "find": "a", "replace": "b", "diff": "..."}]
     with pytest.raises(ValidationError):
         PluginManifest.from_toml_dict(data)
+
+
+def test_host_mode_loopback_remap_without_override_var_rejected() -> None:
+    data = _minimal_docker_run_dict()
+    data["docker"] = {
+        "mode": "docker-run",
+        "image": "example/x:latest",
+        "container_name": "x",
+        "network_mode": "host",
+        "ports": [{"container_port": 80, "publish_strategy": "loopback-remap"}],
+    }
+    with pytest.raises(ValidationError):
+        PluginManifest.from_toml_dict(data)
+
+
+def test_host_mode_loopback_remap_allowed_when_fallback_enabled() -> None:
+    """[docker] is only a best-effort description when [fallback] governs the
+    real launch (e.g. DeepSeek's dynamically-generated compose + entrypoint
+    chaining) — the port-override requirement doesn't apply there."""
+    data = _minimal_docker_run_dict()
+    data["docker"] = {
+        "mode": "docker-run",
+        "image": "example/x:latest",
+        "container_name": "x",
+        "network_mode": "host",
+        "ports": [{"container_port": 80, "publish_strategy": "loopback-remap"}],
+    }
+    data["fallback"] = {"enabled": True, "start_command": ["./start.sh"]}
+    manifest = PluginManifest.from_toml_dict(data)
+    assert manifest.fallback.enabled is True
 
 
 def test_resolve_env_values_serializes_booleans_lowercase() -> None:

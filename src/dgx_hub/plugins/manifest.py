@@ -64,6 +64,13 @@ class PortSpec(BaseModel):
     publish_strategy: Literal[
         "loopback-remap", "gateway-network", "fixed-exclusive"
     ] = "loopback-remap"
+    port_override_env_var: str | None = None
+    """For network_mode = 'host' only: the env var the app itself reads to
+    decide which port to bind (e.g. DeepSeek's `SERVING_PORT`). There is no
+    Docker `-p` mapping under host networking, so this is the only lever the
+    CLI has to support concurrent serving — required whenever a host-mode
+    port uses publish_strategy = 'loopback-remap'.
+    """
 
 
 class DockerOverrides(BaseModel):
@@ -131,6 +138,34 @@ class DockerSpec(BaseModel):
                     "[docker].generate_command is required when mode = 'compose-generated'"
                 )
         return self
+
+
+def check_host_mode_port_semantics(docker: DockerSpec) -> None:
+    """Raise ValueError if `docker`'s ports are inconsistent with
+    network_mode = 'host' (no `-p` mapping exists there, so a port can only
+    be remapped via a port_override_env_var the app itself reads).
+
+    Only meaningful when `[docker]` actually drives the launch — skipped by
+    `PluginManifest` when `[fallback]` is enabled, since then `[docker]` is
+    just a best-effort description, not what's executed.
+    """
+    if docker.network_mode != NetworkMode.HOST:
+        return
+    for port in docker.ports:
+        if port.publish_strategy == "gateway-network":
+            raise ValueError(
+                "publish_strategy 'gateway-network' is not supported with "
+                "network_mode = 'host' (host networking has no private "
+                "bridge network to attach to)"
+            )
+        if port.publish_strategy == "loopback-remap" and not port.port_override_env_var:
+            raise ValueError(
+                f"port {port.container_port}: network_mode = 'host' with "
+                "publish_strategy = 'loopback-remap' requires "
+                "port_override_env_var (there is no `-p` mapping under host "
+                "networking, so this is the only lever to support concurrent "
+                "serving)"
+            )
 
 
 class VariantSpec(BaseModel):
@@ -237,6 +272,12 @@ class PluginManifest(BaseModel):
             defaults = [v for v in self.variant if v.default]
             if len(defaults) > 1:
                 raise ValueError("at most one variant may be marked default = true")
+        return self
+
+    @model_validator(mode="after")
+    def _docker_port_semantics_when_authoritative(self) -> PluginManifest:
+        if not self.fallback.enabled:
+            check_host_mode_port_semantics(self.docker)
         return self
 
     def default_variant_id(self) -> str | None:

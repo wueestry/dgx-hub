@@ -44,7 +44,10 @@ volumes = [
 ]
 env_passthrough = ["HF_TOKEN"]
 # network_mode = host: the app binds SERVING_PORT (8888) directly on the host.
-ports = [{ container_port = 8888, publish_strategy = "loopback-remap" }]
+# port_override_env_var wires dgx-hub's allocated port through to the
+# [fallback] launch (start.sh's own SERVING_PORT env var), so this plugin can
+# run concurrently with others despite host networking.
+ports = [{ container_port = 8888, publish_strategy = "loopback-remap", port_override_env_var = "SERVING_PORT" }]
 command_args = []
 
 [health]

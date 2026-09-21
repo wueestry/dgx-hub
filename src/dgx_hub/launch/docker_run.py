@@ -88,14 +88,23 @@ def build_argv(
     for vol in spec.volumes:
         argv += ["-v", _substitute(vol, repo_dir)]
 
+    # Names that get their value injected below (port overrides), not from
+    # the plugin's configured [env.*] values — skip them in the generic loop
+    # so a stale manifest default can't clash with the -e flag we add later.
+    port_override_names = {
+        port.port_override_env_var
+        for port in spec.ports
+        if spec.network_mode == NetworkMode.HOST and port.port_override_env_var
+    }
+
     command_args = list(spec.command_args)
     for name, value in sorted(env_values.items()):
         if name == "EXTRA_ARGS":
             if value:
                 command_args += shlex.split(value)
             continue
-        if name in spec.env_passthrough:
-            continue  # forwarded from the host environment below, not the configured value
+        if name in spec.env_passthrough or name in port_override_names:
+            continue
         argv += ["-e", f"{name}={value}"]
 
     for name in spec.env_passthrough:
@@ -105,13 +114,26 @@ def build_argv(
 
     backend_address = ""
     if spec.network_mode == NetworkMode.HOST:
-        # No `-p` mapping applies here: the container binds the host port(s)
-        # directly. The caller is responsible for having told the app itself
-        # to bind `allocated_port` via a manifest-declared port-override env
-        # var already present in env_values, if concurrent serving is needed.
-        if spec.ports:
-            container_port = spec.ports[0].container_port
-            backend_address = f"127.0.0.1:{allocated_port or container_port}"
+        for port in spec.ports:
+            if port.publish_strategy == "loopback-remap":
+                if not port.port_override_env_var:
+                    raise ValueError(
+                        f"port {port.container_port}: network_mode = 'host' with "
+                        "publish_strategy = 'loopback-remap' requires "
+                        "port_override_env_var to be set"
+                    )
+                host_port = allocated_port or port.container_port
+                argv += ["-e", f"{port.port_override_env_var}={host_port}"]
+                if not backend_address:
+                    backend_address = f"127.0.0.1:{host_port}"
+            elif port.publish_strategy == "fixed-exclusive":
+                if not backend_address:
+                    backend_address = f"127.0.0.1:{port.container_port}"
+            else:
+                raise ValueError(
+                    f"unsupported publish_strategy for network_mode=host: "
+                    f"{port.publish_strategy!r}"
+                )
     else:
         for port in spec.ports:
             if port.publish_strategy == "loopback-remap":

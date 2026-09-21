@@ -74,12 +74,11 @@ env_passthrough = []
 # the HOST during provisioning (Hub rate-limit avoidance for gated/private
 # checkpoints), never forwarded into the server container itself — it runs
 # fully offline (HF_HUB_OFFLINE=1) against the already-downloaded snapshot.
-ports = [{ container_port = 8000, publish_strategy = "loopback-remap" }]
-# The real script publishes with `-p ${PORT}:8000` — all host interfaces, not
-# loopback-only, and PORT can differ from the container's fixed 8000 (the
-# default profile uses PORT=8888). "loopback-remap" is the closest schema
-# option; note the discrepancy if/when [fallback] launches get wired through
-# dgx-hub's own port allocator instead of the script's own `-p` flag.
+ports = [{ container_port = 8000, publish_strategy = "loopback-remap", port_override_env_var = "PORT" }]
+# The real script publishes with `-p ${PORT}:8000` on all host interfaces
+# (not loopback-only) — port_override_env_var wires dgx-hub's allocated port
+# through as PORT when [fallback] invokes `./flash serve`, so this plugin can
+# run concurrently with others despite the script owning its own `-p` flag.
 command_args = []
 
 [[variant]]
@@ -274,7 +273,11 @@ message = "KV_DTYPE=fp8_e4m3 is only meaningful for long-context runs; leave it 
 
 [fallback]
 enabled = true
-start_command = ["./flash", "serve", "default"]
+# "{variant}" is substituted with the selected --variant id at launch (falls
+# back to "" if none given, though a default variant is always set above) —
+# this is what makes `dgx-hub start qwen3.8-flash-next --variant context-1m`
+# actually run `./flash serve context-1m` instead of always "default".
+start_command = ["./flash", "serve", "{variant}"]
 # `./flash stop` just runs `docker rm -f "$NAME"`; dgx-hub's own generic
 # docker_adapter stop-by-container_name (using [docker].container_name above)
 # covers that equally well, so no stop_command override is declared here.

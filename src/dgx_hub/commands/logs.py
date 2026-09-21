@@ -6,7 +6,6 @@ import typer
 from rich.console import Console
 
 from dgx_hub import docker_adapter
-from dgx_hub.plugins.base import ContainerHandle, RuntimeKind
 from dgx_hub.process import state as state_store
 
 console = Console()
@@ -23,7 +22,7 @@ def show_logs(
         console.print(f"[red]{name}: no state on record[/red]")
         raise typer.Exit(code=1)
 
-    handle = ContainerHandle(kind=RuntimeKind.DOCKER_RUN, container_name=record.container_name)
+    handle = record.to_handle()
     try:
         for line in docker_adapter.logs(handle, follow=follow, tail=tail):
             console.print(line, markup=False, highlight=False)

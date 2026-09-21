@@ -41,12 +41,45 @@ def test_fixed_exclusive_uses_container_port_on_all_interfaces() -> None:
     assert built.backend_address == "127.0.0.1:8888"
 
 
-def test_host_network_skips_port_publish() -> None:
-    spec = make_spec(network_mode=NetworkMode.HOST)
+def test_host_network_fixed_exclusive_skips_port_publish() -> None:
+    spec = make_spec(
+        network_mode=NetworkMode.HOST,
+        ports=[PortSpec(container_port=8888, publish_strategy="fixed-exclusive")],
+    )
     built = build_argv(spec, None, {}, allocated_port=23456, repo_dir=Path("/tmp"))
     assert "--network" in built.argv
     assert "host" in built.argv
     assert "-p" not in built.argv
+    assert built.backend_address == "127.0.0.1:8888"
+
+
+def test_host_network_loopback_remap_requires_override_var() -> None:
+    # DockerSpec itself doesn't enforce this (a manifest with [fallback]
+    # enabled may declare an inconsistent [docker] as a non-authoritative,
+    # best-effort description) — PluginManifest enforces it when [docker]
+    # actually drives the launch; build_argv enforces it defensively too.
+    spec = make_spec(
+        network_mode=NetworkMode.HOST,
+        ports=[PortSpec(container_port=8888, publish_strategy="loopback-remap")],
+    )
+    with pytest.raises(ValueError, match="port_override_env_var"):
+        build_argv(spec, None, {}, allocated_port=23456, repo_dir=Path("/tmp"))
+
+
+def test_host_network_loopback_remap_injects_port_override_env_var() -> None:
+    spec = make_spec(
+        network_mode=NetworkMode.HOST,
+        ports=[
+            PortSpec(
+                container_port=8888,
+                publish_strategy="loopback-remap",
+                port_override_env_var="SERVING_PORT",
+            )
+        ],
+    )
+    built = build_argv(spec, None, {}, allocated_port=23456, repo_dir=Path("/tmp"))
+    assert "-p" not in built.argv
+    assert "SERVING_PORT=23456" in built.argv
     assert built.backend_address == "127.0.0.1:23456"
 
 

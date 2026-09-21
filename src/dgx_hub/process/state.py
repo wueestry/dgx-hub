@@ -5,9 +5,11 @@ from __future__ import annotations
 import json
 import os
 import tempfile
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
 
 from dgx_hub.config import state_file
+from dgx_hub.plugins.base import ContainerHandle, RuntimeKind
 
 
 @dataclass
@@ -19,6 +21,28 @@ class ModelRunRecord:
     port: int
     state: str
     started_at: str
+    kind: str = RuntimeKind.DOCKER_RUN.value
+    compose_project: str | None = None
+    compose_file: str | None = None
+    service_name: str | None = None
+    served_model_ids: list[str] = field(default_factory=list)
+    """Model id(s) the backend's own /v1/models reported it serves — what
+    the gateway routes on. Falls back to the plugin name if discovery
+    fails (e.g. the backend isn't OpenAI-/v1/models-compatible)."""
+
+    def to_handle(self) -> ContainerHandle:
+        """Reconstruct the ContainerHandle this record described, so
+        status/stop/logs address the right runtime (docker run vs compose)
+        instead of assuming DOCKER_RUN.
+        """
+        return ContainerHandle(
+            kind=RuntimeKind(self.kind),
+            container_name=self.container_name,
+            compose_project=self.compose_project,
+            compose_file=Path(self.compose_file) if self.compose_file else None,
+            service_name=self.service_name,
+            backend_address=self.backend_address,
+        )
 
 
 def _read_all() -> dict[str, dict]:

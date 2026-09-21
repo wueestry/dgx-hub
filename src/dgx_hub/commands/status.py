@@ -9,7 +9,6 @@ from rich.console import Console
 from rich.table import Table
 
 from dgx_hub import docker_adapter
-from dgx_hub.plugins.base import ContainerHandle, RuntimeKind
 from dgx_hub.process import state as state_store
 
 console = Console()
@@ -25,10 +24,7 @@ def show_status(
     for name, record in sorted(running.items()):
         docker_state = "-"
         if record.container_name is not None:
-            handle = ContainerHandle(
-                kind=RuntimeKind.DOCKER_RUN, container_name=record.container_name
-            )
-            ds = docker_adapter.status(handle)
+            ds = docker_adapter.status(record.to_handle())
             if not ds.exists:
                 docker_state = "gone"
             elif ds.running:

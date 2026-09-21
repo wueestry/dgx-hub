@@ -80,12 +80,24 @@ class ResourceRequirements:
 
 
 @dataclass(frozen=True)
+class HealthTiming:
+    """Generic health-polling parameters a supervisor needs, independent of
+    whether the plugin is manifest-backed or a hand-written Python class.
+    """
+
+    interval_seconds: float = 2.0
+    startup_grace_seconds: float = 30.0
+    expected_first_boot_seconds: float = 300.0
+
+
+@dataclass(frozen=True)
 class PluginMetadata:
     name: str
     display_name: str
     description: str
     docs_url: str | None
     resources: ResourceRequirements
+    health_timing: HealthTiming = field(default_factory=HealthTiming)
 
 
 @dataclass(frozen=True)
