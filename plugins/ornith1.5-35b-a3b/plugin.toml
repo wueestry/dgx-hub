@@ -1,0 +1,84 @@
+[plugin]
+name = "ornith-1-5-35b-a3b"
+display_name = "Ornith-1.5 35B-A3B (vLLM, NVFP4)"
+description = "vLLM (b12x MoE backend) server for Ornith-1.5-35B-A3B NVFP4 with in-checkpoint MTP speculative decoding and up to 256k context on a single DGX Spark"
+docs_url = "https://github.com/MiaAI-Lab/Ornith-1.5-35B-A3B-DGX-Spark"
+schema_version = 1
+
+[source]
+repo_url = "https://github.com/MiaAI-Lab/Ornith-1.5-35B-A3B-DGX-Spark.git"
+
+# No [provision] section: `vllm serve` auto-downloads the NVFP4 checkpoint
+# (~22 GB) into the named HF cache volume below on first container start,
+# same as this repo's own `hf download` pre-step -- just deferred into the
+# container itself. HF_TOKEN is passed through (below) so huggingface_hub
+# authenticates via env var instead of needing a pre-seeded token file
+# (README's "bare hf can hang on HTTP 401" warning is about an *unset* token,
+# not about which mechanism supplies it).
+
+# No [[patch]] entries: the repo's patches/qwen_triton_warmup.py is applied
+# as a read-only bind mount straight over the image's own module path
+# (declared below in [docker].volumes), not a patch to a file dgx-hub itself
+# manages/diffs.
+
+[docker]
+# start.sh's `docker run` passes the image name followed directly by the full
+# `vllm serve <model> <flags...>` command with no --entrypoint override, so
+# this launch is fully expressible as command_args (trailing CMD) below.
+mode = "docker-run"
+image = "eugr/spark-vllm-b12x:latest"
+container_name = "ornith-1.5-35b-a3b"
+network_mode = "bridge"
+gpus = "all"
+ipc = "host"
+volumes = [
+  "dgx-hub-ornith-hf-cache:/root/.cache/huggingface",
+  "dgx-hub-ornith-vllm-cache:/root/.cache/vllm",
+  "${REPO_DIR}/patches/qwen_triton_warmup.py:/usr/local/lib/python3.12/dist-packages/vllm/model_executor/warmup/qwen_triton_warmup.py:ro",
+]
+env_passthrough = ["HF_TOKEN"]
+ports = [{ container_port = 8888, publish_strategy = "loopback-remap" }]
+# Mirrors start.sh's vllm invocation exactly, except:
+#  - the model arg is the bare HF repo id (vllm/huggingface_hub resolve +
+#    download it into the cache volume above) instead of start.sh's manually
+#    resolved local snapshot directory -- avoids needing dynamic shell logic
+#    to find the downloaded snapshot hash, which a static manifest can't do.
+#  - --gpu-memory-utilization is pinned at the script's static ceiling (0.85)
+#    rather than the script's dynamic free-memory probe (which launches a
+#    throwaway probe container before the real one) -- not expressible as a
+#    single `docker run`. Override via EXTRA_ARGS below if you hit an
+#    at-boot OOM on a non-idle Spark.
+command_args = [
+  "vllm", "serve", "ornith-ai/Ornith-1.5-35B-A3B-NVFP4",
+  "--served-model-name", "ornith-1.5-35b-a3b-nvfp4",
+  "--host", "0.0.0.0",
+  "--port", "8888",
+  "--trust-remote-code",
+  "--enable-prefix-caching",
+  "--spec-method", "mtp",
+  "--spec-tokens", "1",
+  "--max-num-seqs", "24",
+  "--moe-backend", "b12x",
+  "--gpu-memory-utilization", "0.85",
+  "--max-model-len", "262144",
+  "--enable-auto-tool-choice",
+  "--tool-call-parser", "qwen3_xml",
+  "--reasoning-parser", "qwen3",
+]
+
+[health]
+url = "http://{backend_address}/health"
+interval_seconds = 5
+timeout_seconds = 5
+startup_grace_seconds = 60
+expected_first_boot_seconds = 1800
+
+[resources]
+min_free_disk_gib = 40
+min_free_memory_gib = 50
+gpu_required = true
+
+[env.EXTRA_ARGS]
+type = "string"
+default = ""
+description = "Free-form escape hatch appended after the baked-in vllm serve flags. vLLM's argparse takes the last occurrence of a repeated flag, so this is also how to override defaults baked into command_args above (e.g. '--gpu-memory-utilization 0.7 --max-num-seqs 12'). This repo's start.sh has no other CLI-level tunables exposed as env-var overrides -- MTP spec-tokens, moe-backend, and context length are fixed to this checkpoint's shape per the README."

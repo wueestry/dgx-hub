@@ -1,0 +1,117 @@
+[plugin]
+name = "deepseek-v4-flash-spark"
+display_name = "DeepSeek V4 Flash 0731 (EXL3, DSpark)"
+description = "Single-node DeepSeek V4 Flash 0731 EXL3 3.0bpw via SparkInfer/vLLM, DSpark K5 speculative decoding, 384k deep-context NVFP4 KV cache"
+docs_url = "https://github.com/MiaAI-Lab/DeepSeek-v4-Flash-One-DGX-Spark"
+schema_version = 1
+
+[source]
+repo_url = "https://github.com/MiaAI-Lab/DeepSeek-v4-Flash-One-DGX-Spark.git"
+
+# No [provision] section: `start.sh` auto-downloads the ~107 GB checkpoint
+# into ./hf-hub and coalesces it into ./data/tp1 on first boot.
+
+# No [[patch]] entries: the repo's own image-patch/ files are applied as
+# read-only bind mounts (declared below in [docker].volumes), not patches
+# to files dgx-hub itself manages.
+
+[docker]
+# `start.sh` boots via a generated `docker compose` file whose `entrypoint:`
+# chains a boot-time fix (xgrammar upgrade for tool calling) in front of the
+# image's own /opt/recipe/scripts/entrypoint.sh — dgx-hub's docker-run engine
+# has no `--entrypoint` override, so that chain can't be expressed here.
+# [docker] below is kept as an accurate, best-effort static description of
+# the launch (image, mounts, env); actual start/stop goes through [fallback]
+# to the repo's own start.sh/stop.sh until compose/entrypoint support lands.
+mode = "docker-run"
+image = "ghcr.io/0xsero/deepseek-v4-flash-0731-spark-sparkinfer@sha256:2e077489a83a0360952828051fe7f7a32c1801e5ce8436d85f7267583d614ff4"
+container_name = "deepseek-v4-flash-spark"
+network_mode = "host"
+gpus = "all"
+ipc = "host"
+shm_size = "16gb"
+volumes = [
+  "${REPO_DIR}/data:/models",
+  "${REPO_DIR}/cache:/cache",
+  "${REPO_DIR}/hf-hub:/hf-cache",
+  "${REPO_DIR}/image-patch/coalesce_rank_sliced_exl3.py:/opt/recipe/scripts/coalesce_rank_sliced_exl3.py:ro",
+  "${REPO_DIR}/image-patch/sparkinfer/moe/fused_moe/_impl.py:/opt/sparkinfer/sparkinfer/moe/fused_moe/_impl.py:ro",
+  "${REPO_DIR}/image-patch/sparkinfer/moe/_shared/kernels/tiny_decode.py:/opt/sparkinfer/sparkinfer/moe/_shared/kernels/tiny_decode.py:ro",
+  "${REPO_DIR}/image-patch/vllm/models/deepseek_v4/nvidia/dspark.py:/opt/vllm/vllm/models/deepseek_v4/nvidia/dspark.py:ro",
+  "${REPO_DIR}/image-patch/serve-ds4-flash.sh:/opt/vllm/serve-ds4-flash.sh:ro",
+  "${REPO_DIR}/image-patch/sparkinfer/attention/_shared/mla/prefill.py:/opt/sparkinfer/sparkinfer/attention/_shared/mla/prefill.py:ro",
+  "${REPO_DIR}/image-patch/sparkinfer/attention/_shared/mla/prefill_mg.py:/opt/sparkinfer/sparkinfer/attention/_shared/mla/prefill_mg.py:ro",
+]
+env_passthrough = ["HF_TOKEN"]
+# network_mode = host: the app binds SERVING_PORT (8888) directly on the host.
+ports = [{ container_port = 8888, publish_strategy = "loopback-remap" }]
+command_args = []
+
+[health]
+url = "http://{backend_address}/health"
+interval_seconds = 15
+timeout_seconds = 5
+startup_grace_seconds = 1200
+expected_first_boot_seconds = 7200
+
+[resources]
+min_free_disk_gib = 130
+min_free_memory_gib = 120
+gpu_required = true
+
+[env.SERVED_MODEL_NAME]
+type = "string"
+default = "deepseek-v4-flash-0731"
+description = "Model id clients send as `model`"
+
+[env.MAX_MODEL_LEN]
+type = "integer"
+default = 384000
+description = "Max context length (~13% under the worst-observed cold-boot KV pool of 439,622 tokens at util 0.94)"
+
+[env.MAX_NUM_SEQS]
+type = "integer"
+default = 1
+description = "Concurrent request slots; the KV pool shrinks with seq count (hybrid cache split), so depth trades against concurrency"
+
+[env.GPU_MEMORY_UTILIZATION]
+type = "string"
+default = "0.94"
+description = "Max fraction of the 121.63 GiB unified memory budget this host boots at"
+
+[env.KV_RECORD]
+type = "enum"
+choices = ["stock432", "padded", "rope368"]
+default = "stock432"
+description = "KV cache record layout: native 432B NVFP4 (default, ~440k pool) vs. 584B FP8-compat padded fallback"
+
+[env.MODE]
+type = "enum"
+choices = ["dspark", "none"]
+default = "dspark"
+description = "Fixed K5 DSpark speculative-decoding draft"
+
+[env.ABLATE]
+type = "boolean"
+default = false
+description = "Opt-in runtime refusal-direction ablation (projects a published refusal direction out of layers 10-42; no weight edits). Flipping this forces a slow recompile boot."
+
+[env.VERIFY_MODEL_CHECKSUMS]
+type = "boolean"
+default = true
+description = "SHA-256 inventory check of downloaded weights on boot"
+
+[env.SERVING_PORT]
+type = "integer"
+default = 8888
+description = "OpenAI-compatible API port (network_mode: host, so this is the host's own port)"
+
+[env.EXTRA_ARGS]
+type = "string"
+default = ""
+description = "Free-form escape hatch; unused here since launch goes through [fallback]'s start.sh"
+
+[fallback]
+enabled = true
+start_command = ["./start.sh", "--no-wait"]
+stop_command = ["./stop.sh", "-f"]

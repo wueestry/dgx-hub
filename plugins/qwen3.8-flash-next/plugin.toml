@@ -1,0 +1,280 @@
+[plugin]
+name = "qwen3.8-flash-next"
+display_name = "Qwen3.8-Flash-Next (vLLM, PLE mmap, DGX Spark)"
+description = "vLLM server for Qwen3.8-Flash-Next (~176B params, 6B active, NVFP4) on one DGX Spark: the 48 GiB n-gram PLE table is served from NVMe via mmap so weights (~75 GiB) fit next to a usable KV cache in the 128 GB unified pool, plus prefix-caching, determinism and MTP speculative-decoding fixes for GB10"
+docs_url = "https://github.com/blazux/qwen3.8-Flash-DGX"
+schema_version = 1
+
+[source]
+repo_url = "https://github.com/blazux/qwen3.8-Flash-DGX.git"
+
+# `./flash setup <profile>` is this repo's own idempotent multi-step provisioner:
+# it builds the image the profile expects (Dockerfile for base=preview,
+# Dockerfile.v0.29 for base=v0.29) with `docker build -t <tag> .`, downloads the
+# ~124 GiB checkpoint into the local HF cache (resumable), and — for MODE=hybrid /
+# hybrid-mtp (the default profile) — runs the one-time fp8-side-layer conversion
+# (and, for hybrid-mtp, the NVFP4 MTP-drafter graft). Each of the four steps checks
+# its own state first and is skipped when already done, so this is exactly the
+# "docker build" provisioning step the schema expects, just wrapped in the repo's
+# own idempotent tooling because a bare `docker build` alone would leave no
+# checkpoint to serve. Image tag for the default (preview-base) profile:
+# "qwen38-flash-dgx" — referenced as [docker].image below.
+[provision]
+command = ["./flash", "setup", "default"]
+idempotent = true
+estimated_duration = "~1 min if the image/weights/hybrid-checkpoint already exist; ~60-120 min on a first run (124 GiB checkpoint download + ~10 min one-time hybrid-checkpoint conversion, network-dependent)"
+
+# No [[patch]] entries: every source patch this repo applies (PLE mmap, GB10 FLA
+# fixes, mamba state-copy guard, prefix-caching fix, exact/deterministic QSA
+# top-k, hybrid fp8 side layers, fp8 KV, det-topk kernel, M%4 padding, reduced
+# MTP draft vocab, ModelOpt block-MoE, tool-marker patches) is baked into the
+# image at `docker build` time by the Dockerfile itself — nothing left for
+# dgx-hub to patch in the cloned repo before launch.
+
+# scripts/serve.sh (what `./flash serve <profile>` calls) is not a static
+# `docker run` invocation: before it runs one, it (1) resolves the actual
+# on-disk HF snapshot directory by reading refs/main out of the cache — a
+# path whose last component is a content hash only known after download, not
+# something a manifest can hardcode; for MODE=hybrid it further points at a
+# sibling "<hash>-fp8hybrid" directory created by the one-time prepare step;
+# (2) when EFFORT_ALIAS=1 (default), rewrites a one-line check in the
+# checkpoint's own chat_template.jinja into a patched copy and bind-mounts
+# that instead, picking the first writable cache directory on the host; and
+# (3) picks the CUDA-graph splitting-op list and validates flag combinations
+# based on the image's own `qwen38.base` label (preview vs v0.29). None of
+# this — dynamic host-path resolution, on-the-fly template rewriting,
+# label-conditional flag selection — is expressible as static [docker]
+# fields (docker_run.py only renders a fixed image/env/volumes/ports/CMD).
+# So actual start/stop goes through [fallback] to the repo's own
+# flash/serve.sh wrapper. [docker] below is kept as an accurate, best-effort
+# static description of the resulting launch (image, mounts, ports, env) for
+# resource estimation and anything that reads the manifest without
+# executing it.
+[docker]
+mode = "docker-run"
+image = "qwen38-flash-dgx"
+container_name = "qwen38-flash"
+network_mode = "bridge"
+gpus = "all"
+ipc = "host"
+shm_size = "16g"
+volumes = []
+# Not expressed above (not repo-relative, so ${REPO_DIR} doesn't apply, and not
+# rendered by dgx-hub anyway while [fallback] governs the actual launch — see
+# above):
+#   - $HF_CACHE (default ~/.cache/huggingface) -> /hf  (the checkpoint; -e
+#     HF_HOME=/hf -e HF_HUB_OFFLINE=1)
+#   - the EFFORT_ALIAS=1 rewritten chat_template.jinja, read-only, at a fixed
+#     in-container path (host location resolved at launch time, see above)
+#   - optional COMPILE_CACHE bind/named-volume mounts for vLLM's and
+#     FlashInfer's compiled-graph caches across boots (unset by default: they
+#     live inside the container and are rebuilt every boot, ~80s)
+env_passthrough = []
+# HF_TOKEN/HUGGING_FACE_HUB_TOKEN are read by scripts/download-weights.sh on
+# the HOST during provisioning (Hub rate-limit avoidance for gated/private
+# checkpoints), never forwarded into the server container itself — it runs
+# fully offline (HF_HUB_OFFLINE=1) against the already-downloaded snapshot.
+ports = [{ container_port = 8000, publish_strategy = "loopback-remap" }]
+# The real script publishes with `-p ${PORT}:8000` — all host interfaces, not
+# loopback-only, and PORT can differ from the container's fixed 8000 (the
+# default profile uses PORT=8888). "loopback-remap" is the closest schema
+# option; note the discrepancy if/when [fallback] launches get wired through
+# dgx-hub's own port allocator instead of the script's own `-p` flag.
+command_args = []
+
+[[variant]]
+id = "default"
+label = "Recommended: NVIDIA NVFP4 checkpoint, hybrid fp8 side layers, 500k context (YaRN), MTP=2, deterministic (best on the agentic tournament)"
+default = true
+# inherits [docker] as-is; `./flash serve default`
+
+[[variant]]
+id = "native"
+label = "Default recipe at the native 262144-token context (no YaRN)"
+
+[[variant]]
+id = "speed"
+label = "Default + MTP=3: +7% decode for about one tournament point"
+
+[[variant]]
+id = "shared"
+label = "Default + smaller prefill chunks, so decoding clients stay responsive while others prefill (issue #9)"
+
+[[variant]]
+id = "context"
+label = "RadixArk checkpoint + NVFP4 MTP draft-experts graft: +22% KV over the RadixArk hybrid checkpoint"
+
+[[variant]]
+id = "context-1m"
+label = "1M-token context via fp8_e4m3 KV cache (x1.9 KV pool, at a speed and some quality cost)"
+
+[[variant]]
+id = "published"
+label = "NVFP4 checkpoint exactly as published, no fp8 side layers (same quality, ~15-25% slower decode)"
+
+[[variant]]
+id = "v0.29"
+label = "Default recipe rebuilt on the vLLM v0.29.0 release image instead of the preview build (Dockerfile.v0.29; measured at parity)"
+docker_overrides = { image = "qwen38-flash-dgx:v0.29" }
+# The other variants above differ from [docker]/[env.*] only in profile env
+# values (MODE/CTX/YARN/MTP/KV_DTYPE/...) applied by scripts/serve.sh, which
+# DockerOverrides has no field for (command_args would become CMD args to the
+# image's fixed vLLM entrypoint, not env vars, and is unused while [fallback]
+# governs the real launch) — they exist here so a variant id maps 1:1 onto
+# this repo's own `profiles/*.env` names for `./flash serve <id>`.
+
+[health]
+url = "http://{backend_address}/health"
+interval_seconds = 5
+timeout_seconds = 5
+startup_grace_seconds = 90
+expected_first_boot_seconds = 900
+
+[resources]
+# README/doctor: ~124 GiB checkpoint + ~13 GiB hybrid side layers + ~3.4 GiB MTP
+# graft (hybrid-mtp only) + image layers; `./flash doctor` requires >=140 GB free
+# for the download alone. Memory: doctor requires >=115 GiB total unified memory
+# ("the recipe needs the Spark's 128 GB pool") with GPU_MEM=0.80 needing that
+# fraction free to boot.
+min_free_disk_gib = 150
+min_free_memory_gib = 110
+gpu_required = true
+
+[env.MODEL]
+type = "enum"
+choices = ["nvidia/Qwen3.8-Flash-Next-NVFP4", "RadixArk/Qwen3.8-Flash-Next-NVFP4"]
+default = "nvidia/Qwen3.8-Flash-Next-NVFP4"
+description = "HF checkpoint id. RadixArk's copy is needed for MODE=hybrid-mtp (bf16 MTP drafter to graft NVFP4 experts onto)"
+
+[env.MODE]
+type = "enum"
+choices = ["nvfp4", "hybrid", "hybrid-mtp"]
+default = "hybrid"
+description = "nvfp4 = checkpoint as published; hybrid = fp8 side layers (+20% decode, +15-20% KV, needs scripts/prepare-hybrid.sh); hybrid-mtp = hybrid + NVFP4 MTP draft experts (RadixArk checkpoint only, needs scripts/prepare-mtp-graft.sh too)"
+
+[env.CTX]
+type = "integer"
+default = 500000
+description = "Max context length. Native ceiling is 262144 without YaRN; up to ~500000 validated with YARN=1, 1M needs KV_DTYPE=fp8_e4m3"
+
+[env.YARN]
+type = "boolean"
+default = true
+description = "Enable YaRN rope scaling (factor 4) to serve CTX above the native 262144"
+
+[env.MTP]
+type = "integer"
+default = 2
+description = "Speculative tokens from the model's MTP head (0 disables speculative decoding)"
+
+[env.KV_DTYPE]
+type = "enum"
+choices = ["auto", "fp8_e4m3"]
+default = "auto"
+description = "auto = bf16 KV (recommended). fp8_e4m3 = ~1.9x KV pool / 1M ctx at a speed and quality cost; not available on the v0.29 base"
+
+[env.GPU_MEM]
+type = "string"
+default = "0.80"
+description = "Fraction of the 128 GB unified pool for weights+KV (--gpu-memory-utilization). 0.85 buys ~2 GiB more KV but risks swap after a day; 0.875 OOM-killed on a 300k prefill"
+
+[env.SEQS]
+type = "integer"
+default = 8
+description = "Max concurrent sequences (--max-num-seqs). Leaving this at 1-2 while measuring throughput silently queues requests"
+
+[env.PORT]
+type = "integer"
+default = 8888
+description = "Host port for the OpenAI-compatible API (container always listens on 8000 internally)"
+
+[env.PREFIX_CACHE]
+type = "boolean"
+default = true
+description = "Enable vLLM prefix caching (--enable-prefix-caching); correct with this image's block_size fix. Repeated prefixes skip the prefill"
+
+[env.DET_TOPK]
+type = "boolean"
+default = true
+description = "Deterministic persistent_topk kernel for the QSA sparse-attention top-k, at no prefill cost. Wins over EXACT_TOPK when both are set"
+
+[env.EXACT_TOPK]
+type = "boolean"
+default = false
+description = "Exact torch.topk fallback for deterministic QSA top-k (also deterministic, but -20-40% long-context prefill vs DET_TOPK)"
+
+[env.PAD_M4]
+type = "boolean"
+default = false
+description = "Hybrid mode only: pad M%4 in the blockwise-fp8 GEMM, ~-40% TTFT at 8k with PREFIX_CACHE=0. A no-op with PREFIX_CACHE=1 (the default) and on the v0.29 base"
+
+[env.DRAFT_VOCAB]
+type = "string"
+default = "1"
+description = "MTP drafter vocabulary: 1 = reduced 65,536-token slice (+20% decode, same tournament score, default), 0 = full vocabulary, or a path to your own ids.npy"
+
+[env.MADVISE]
+type = "enum"
+choices = ["random", "normal"]
+default = "random"
+description = "madvise() hint for the mmapped PLE table: random = no readahead, cleaner page cache (default); normal = sequential-ish readahead"
+
+[env.FAST_ROWS]
+type = "integer"
+default = 0
+description = "PLE gathers of up to this many unique rows run inline on one thread instead of the WORKERS pool; 0 = every gather goes to the pool (higher aggregate decode under concurrency), 512 = old inline path"
+
+[env.WORKERS]
+type = "integer"
+default = 32
+description = "Thread-pool size for the mmapped PLE table gather"
+
+[env.EFFORT_ALIAS]
+type = "boolean"
+default = true
+description = "Accept reasoning_effort high/max (aliased to xhigh) and minimal (aliased to low) on /v1/messages — the checkpoint's chat template otherwise 400s them, including Claude Code's default 'high'"
+
+[env.KV_CACHE_MEM]
+type = "string"
+default = ""
+description = "Exact KV cache size in bytes (--kv-cache-memory-bytes), overriding GPU_MEM's fraction-of-total calculation. Empty = let GPU_MEM decide"
+
+[env.PREWARM]
+type = "boolean"
+default = false
+description = "Stream the full 48 GiB PLE table once at boot to warm the page cache before serving traffic"
+
+[env.LOG_REQUESTS]
+type = "boolean"
+default = false
+description = "Log every prompt and output (VLLM_LOGGING_LEVEL=DEBUG, --enable-log-requests --enable-log-outputs) for tools/vllm_watch.py. Debugging only: privacy + unbounded logs"
+
+[env.PROM_MULTIPROC]
+type = "boolean"
+default = false
+description = "Opt-in: aggregate the vllm:ple_mmap_* engine-side counters into /metrics (off by default so it does not change what existing dashboards see)"
+
+[env.COMPILE_CACHE]
+type = "string"
+default = ""
+description = "Where to persist vLLM's compiled graphs and FlashInfer's JIT modules across boots. Empty = inside the container (rebuilt every boot, ~80s). A bare name = named docker volumes; an absolute path = bind-mounted dirs"
+
+[env.EXTRA]
+type = "string"
+default = ""
+description = "Extra vllm serve flags appended verbatim (this repo's own free-form escape hatch)"
+
+[[env.validation]]
+rule = "not (YARN == false and CTX > 262144)"
+message = "CTX above the native 262144 requires YARN=true"
+
+[[env.validation]]
+rule = "not (KV_DTYPE == 'fp8_e4m3' and MODE == 'nvfp4' and CTX <= 262144)"
+message = "KV_DTYPE=fp8_e4m3 is only meaningful for long-context runs; leave it at auto below the native context length"
+
+[fallback]
+enabled = true
+start_command = ["./flash", "serve", "default"]
+# `./flash stop` just runs `docker rm -f "$NAME"`; dgx-hub's own generic
+# docker_adapter stop-by-container_name (using [docker].container_name above)
+# covers that equally well, so no stop_command override is declared here.
