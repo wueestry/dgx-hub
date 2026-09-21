@@ -1,0 +1,78 @@
+[plugin]
+name = "qwen3.6-35b-a3b"
+display_name = "Qwen3.6-35B-A3B (vLLM, NVFP4)"
+description = "vLLM server for Qwen3.6-35B-A3B NVFP4 (35B total / 3B active MoE, 8 routed + 1 shared expert, DeltaNet + Gated Attention), NVIDIA's DGX-Spark-optimized single-GPU recipe with fp8 KV cache and prefix caching, up to 262144-token native context (1,010,000 via YaRN)"
+docs_url = "https://huggingface.co/nvidia/Qwen3.6-35B-A3B-NVFP4"
+schema_version = 1
+
+[source]
+repo_url = "https://huggingface.co/nvidia/Qwen3.6-35B-A3B-NVFP4"
+
+# No [provision] section: `vllm serve` auto-downloads the NVFP4 checkpoint
+# into the named HF cache volume below on first container start.
+# No [[patch]] entries and no [fallback]: NVIDIA's own "DGX Spark optimized"
+# recipe for this checkpoint is a bare `vllm serve` invocation, fully
+# expressible via [docker] below -- same shape as the Ornith plugin.
+
+[docker]
+mode = "docker-run"
+# NVIDIA's own model card publishes this exact image for the "DGX Spark
+# optimized" command below.
+image = "vllm/vllm-openai:nightly"
+container_name = "qwen3.6-35b-a3b"
+network_mode = "bridge"
+gpus = "all"
+ipc = "host"
+volumes = ["dgx-hub-qwen36-35b-hf-cache:/root/.cache/huggingface"]
+env_passthrough = ["HF_TOKEN"]
+ports = [{ container_port = 8888, publish_strategy = "loopback-remap" }]
+# NVIDIA's published "DGX Spark optimized" vllm serve command for this
+# checkpoint, verbatim except --host/--port adjusted to this repo's 8888
+# convention: fp8 KV cache, marlin MoE backend, fastsafetensors loading, and
+# a conservative gpu-memory-utilization/max-num-seqs tuned for a single
+# unified-memory GPU rather than a multi-GPU datacenter box.
+# NVFP4 requires Hopper or Blackwell (compute capability >= 9.0) -- it will
+# not load on Ampere or older GPUs (ModelOpt raises a capability-check error
+# at startup, same failure shape as Nemotron 3 Nano's FP8 variant on this
+# repo's RTX 3070 test box).
+command_args = [
+  "vllm", "serve", "nvidia/Qwen3.6-35B-A3B-NVFP4",
+  "--served-model-name", "qwen3.6-35b-a3b",
+  "--host", "0.0.0.0",
+  "--port", "8888",
+  "--tensor-parallel-size", "1",
+  "--trust-remote-code",
+  "--kv-cache-dtype", "fp8",
+  "--attention-backend", "flashinfer",
+  "--moe-backend", "marlin",
+  "--gpu-memory-utilization", "0.4",
+  "--max-model-len", "262144",
+  "--max-num-seqs", "4",
+  "--max-num-batched-tokens", "8192",
+  "--enable-chunked-prefill",
+  "--async-scheduling",
+  "--enable-prefix-caching",
+  "--load-format", "fastsafetensors",
+  "--reasoning-parser", "qwen3",
+  "--tool-call-parser", "qwen3_xml",
+  "--enable-auto-tool-choice",
+]
+
+[health]
+url = "http://{backend_address}/health"
+interval_seconds = 5
+timeout_seconds = 5
+startup_grace_seconds = 90
+expected_first_boot_seconds = 1800
+
+[resources]
+# NVFP4 checkpoint is ~3.06x smaller than the ~71.9 GiB BF16 original
+# (~24 GiB), plus KV cache and image layers.
+min_free_disk_gib = 40
+min_free_memory_gib = 30
+gpu_required = true
+
+[env.EXTRA_ARGS]
+type = "string"
+default = ""
+description = "Free-form escape hatch appended after the baked-in vllm serve flags (vLLM's argparse takes the last occurrence of a repeated flag, so this also overrides defaults above, e.g. '--gpu-memory-utilization 0.6 --max-num-seqs 8')"
