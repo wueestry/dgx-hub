@@ -6,6 +6,7 @@ import typer
 from rich.console import Console
 
 from dgx_hub import docker_adapter
+from dgx_hub.gateway import auto_sync
 from dgx_hub.process import state as state_store
 
 console = Console()
@@ -46,3 +47,5 @@ def stop_models(
         record.state = "stopped"
         state_store.save(record)
         console.print(f"[green]{name}[/green]: stopped")
+
+    auto_sync.try_reconcile_quietly()

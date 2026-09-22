@@ -11,7 +11,7 @@ Model servers (SGLang, vLLM, etc.) usually ship as a reference repo with its own
 - **Generic Docker launch engine** — manifests are rendered into `docker run` (or `docker compose`) invocations by the CLI itself; plugins don't shell out to bespoke wrapper scripts unless declared via an explicit fallback.
 - **Port allocation & conflict detection** — automatically assigns host ports and prevents starting a plugin whose container name is already in use.
 - **Concurrent multi-model start** — each model's provision → start → health-poll lifecycle runs in its own background supervisor thread, rendered as a live `rich` dashboard until every model reaches SERVING (or FAILED).
-- **One public port, route by model** — an optional OpenAI-compatible gateway proxies `/v1/...` requests to whichever backend is currently serving the request's `"model"`, so multiple models are reachable through one familiar endpoint instead of one port each.
+- **One public port, route by model** — an optional gateway (Postgres + [LiteLLM proxy](https://github.com/BerriAI/litellm), run as Docker containers) routes `/v1/...` requests to whichever backend is currently serving the request's `"model"`, so multiple models are reachable through one familiar, API-key-gated endpoint instead of one port each. dgx-hub keeps LiteLLM's model list in sync with ground truth (see `dgx-hub gateway sync`); LiteLLM itself handles auth, streaming, and per-key spend tracking.
 - **State tracking** — remembers what's been started, in `platformdirs`-managed state, ground-truthed against live Docker container status.
 
 ## Installation
@@ -19,11 +19,10 @@ Model servers (SGLang, vLLM, etc.) usually ship as a reference repo with its own
 Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
 
 ```bash
-uv sync                    # core CLI
-uv sync --extra gateway    # + the OpenAI-compatible routing gateway
+uv sync
 ```
 
-This installs the `dgx-hub` command into the project's virtual environment (`.venv/bin/dgx-hub`).
+This installs the `dgx-hub` command into the project's virtual environment (`.venv/bin/dgx-hub`). The gateway (`dgx-hub gateway start`) additionally needs Docker (or Podman's Docker CLI emulation) to run its Postgres + LiteLLM containers — no extra Python dependency.
 
 ## Usage
 
@@ -54,10 +53,22 @@ dgx-hub logs qwen3.8-27b-sglang --follow
 dgx-hub stop qwen3.8-27b-sglang
 dgx-hub stop --all
 
-# Run the OpenAI-compatible gateway (needs `uv sync --extra gateway`) — routes
+# Start the gateway infra (Postgres + LiteLLM, as Docker containers) — routes
 # http://localhost:8888/v1/... to whichever backend serves the request's "model"
-dgx-hub gateway run
+dgx-hub gateway start
+dgx-hub gateway status
+dgx-hub gateway stop
+
+# Issue a virtual API key for calling the gateway, and check spend/budget per key
+dgx-hub gateway keys create my-app --budget 20
+dgx-hub gateway keys list
+
+# Push ground-truth model routes into LiteLLM right now (also runs automatically
+# after `start`/`stop`/`status` once the gateway is up)
+dgx-hub gateway sync
 ```
+
+LiteLLM's model list is managed entirely through its admin API by the reconciler in `gateway/reconcile.py` — `dgx-hub gateway`'s own `litellm-config.yaml` (written once under the gateway's config directory) only holds `general_settings`/`litellm_settings`, not `model_list`.
 
 ## Plugins
 
@@ -92,7 +103,8 @@ src/dgx_hub/
 ├── launch/             # renders a manifest + variant into a docker-run or compose launch spec
 ├── plugins/            # manifest schema, loader/discovery, plugin protocol
 ├── process/            # port allocation, run-state persistence, ModelSupervisor (provision -> start -> health-poll)
-├── gateway/            # OpenAI-compatible reverse proxy: registry, streaming httpx passthrough, FastAPI app
+├── gateway/            # Postgres + LiteLLM proxy infra, ground-truth registry, and the
+│                       #   reconciler that pushes routes into LiteLLM's admin API
 └── ui/                 # rich Live dashboard, questionary picker/prompts
 plugins/                # built-in plugin manifests
 tests/                  # pytest suite

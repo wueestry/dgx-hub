@@ -21,7 +21,17 @@ app.command("status")(status.show_status)
 app.command("logs")(logs.show_logs)
 
 gateway_app = typer.Typer(help="The OpenAI-compatible routing proxy.")
-gateway_app.command("run")(gateway_cmd.gateway_run)
+gateway_app.command("start")(gateway_cmd.gateway_start)
+gateway_app.command("stop")(gateway_cmd.gateway_stop)
+gateway_app.command("status")(gateway_cmd.gateway_status)
+gateway_app.command("sync")(gateway_cmd.gateway_sync)
+gateway_app.command("logs")(gateway_cmd.gateway_logs)
+
+gateway_keys_app = typer.Typer(help="Manage virtual API keys for calling the gateway.")
+gateway_keys_app.command("create")(gateway_cmd.gateway_keys_create)
+gateway_keys_app.command("list")(gateway_cmd.gateway_keys_list)
+gateway_app.add_typer(gateway_keys_app, name="keys")
+
 app.add_typer(gateway_app, name="gateway")
 
 

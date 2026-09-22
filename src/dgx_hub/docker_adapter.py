@@ -101,6 +101,24 @@ def status(handle: ContainerHandle) -> DockerStatus:
     )
 
 
+def container_ip(handle: ContainerHandle, network: str = DEFAULT_GATEWAY_NETWORK) -> str | None:
+    """The container's IP address on `network`, or None if it's not attached
+    to it. Needed to reach a `gateway-network`-strategy backend
+    (`backend_address` = `container_name:port`) from a process that isn't
+    itself attached to that bridge and so can't resolve the name via
+    Docker's embedded DNS -- e.g. the LiteLLM gateway container, which runs
+    under `network_mode: host` to reach loopback-bound backends directly.
+    """
+    payload = _docker_inspect(_inspect_name(handle))
+    if payload is None:
+        return None
+    networks = payload.get("NetworkSettings", {}).get("Networks") or {}
+    net = networks.get(network)
+    if not net:
+        return None
+    return net.get("IPAddress") or None
+
+
 def inspect_ports(handle: ContainerHandle) -> dict[int, int]:
     """Real container_port -> host_port bindings, read from Docker itself
     rather than trusted from the manifest.

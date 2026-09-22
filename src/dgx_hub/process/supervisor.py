@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from dgx_hub import docker_adapter
+from dgx_hub.gateway import auto_sync
 from dgx_hub.plugins.base import ContainerHandle, ModelPlugin, ModelState, RunContext
 
 
@@ -83,6 +84,8 @@ class ModelSupervisor:
             self._poll_until_serving(handle)
         except Exception as exc:
             self._update(state=ModelState.FAILED, error=str(exc))
+        finally:
+            auto_sync.try_reconcile_quietly()
 
     def _wait_for_container_running(self, handle: ContainerHandle, timeout: float = 60.0) -> None:
         deadline = time.monotonic() + timeout

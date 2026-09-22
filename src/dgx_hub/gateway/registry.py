@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from dgx_hub import docker_adapter
+from dgx_hub.plugins.base import ContainerHandle
 from dgx_hub.process import state as state_store
+from dgx_hub.process.state import ModelRunRecord
 
 
 def current_routes() -> dict[str, str]:
@@ -18,8 +20,26 @@ def current_routes() -> dict[str, str]:
             continue
         if record.container_name is None and record.service_name is None:
             continue
-        if not docker_adapter.status(record.to_handle()).running:
+        handle = record.to_handle()
+        if not docker_adapter.status(handle).running:
             continue
+        address = _resolve_address(record, handle)
         for model_id in record.served_model_ids or [record.name]:
-            routes[model_id] = record.backend_address
+            routes[model_id] = address
     return routes
+
+
+def _resolve_address(record: ModelRunRecord, handle: ContainerHandle) -> str:
+    """`backend_address` is `container_name:port` for `gateway-network`
+    plugins — resolvable by name only from a process attached to that same
+    bridge network. Callers outside it (e.g. the LiteLLM gateway container,
+    which uses host networking to reach loopback-bound backends directly)
+    need the container's actual bridge IP instead.
+    """
+    host, _, port = record.backend_address.rpartition(":")
+    if host != record.container_name:
+        return record.backend_address
+    ip = docker_adapter.container_ip(handle)
+    if ip is None:
+        return record.backend_address
+    return f"{ip}:{port}"

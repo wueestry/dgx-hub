@@ -9,6 +9,7 @@ from rich.console import Console
 from rich.table import Table
 
 from dgx_hub import docker_adapter
+from dgx_hub.gateway import auto_sync
 from dgx_hub.process import state as state_store
 
 console = Console()
@@ -18,6 +19,7 @@ def show_status(
     json_output: bool = typer.Option(False, "--json", help="Emit machine-readable JSON"),
 ) -> None:
     """Show status of every model dgx-hub has ever started."""
+    auto_sync.try_reconcile_quietly()
     running = state_store.load_all()
 
     rows: list[tuple[str, str, str, str, str]] = []
