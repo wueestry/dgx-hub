@@ -33,12 +33,30 @@ def test_basic_loopback_remap() -> None:
     assert built.backend_address == "127.0.0.1:19999"
     assert built.argv[-1] == "example/img:latest"
 
+    # Bridge-mode backends also join dgx-hub-net alongside their loopback
+    # publish (the two aren't mutually exclusive outside host networking),
+    # so the gateway can reach them by container name even though the CLI's
+    # own health checks keep using the loopback backend_address above.
+    assert "--network" in built.argv
+    assert "dgx-hub-net" in built.argv
+    assert built.gateway_address == "c1:8888"
+
 
 def test_fixed_exclusive_uses_container_port_on_all_interfaces() -> None:
     spec = make_spec(ports=[PortSpec(container_port=8888, publish_strategy="fixed-exclusive")])
     built = build_argv(spec, None, {}, allocated_port=0, repo_dir=Path("/tmp"))
     assert "8888:8888" in built.argv
     assert built.backend_address == "127.0.0.1:8888"
+    assert built.gateway_address == "c1:8888"
+
+
+def test_gateway_network_strategy_has_no_host_publish() -> None:
+    spec = make_spec(ports=[PortSpec(container_port=8888, publish_strategy="gateway-network")])
+    built = build_argv(spec, None, {}, allocated_port=0, repo_dir=Path("/tmp"))
+    assert "-p" not in built.argv
+    assert "--network" in built.argv and "dgx-hub-net" in built.argv
+    assert built.backend_address == "c1:8888"
+    assert built.gateway_address == "c1:8888"
 
 
 def test_host_network_fixed_exclusive_skips_port_publish() -> None:
@@ -49,8 +67,10 @@ def test_host_network_fixed_exclusive_skips_port_publish() -> None:
     built = build_argv(spec, None, {}, allocated_port=23456, repo_dir=Path("/tmp"))
     assert "--network" in built.argv
     assert "host" in built.argv
+    assert "dgx-hub-net" not in built.argv
     assert "-p" not in built.argv
     assert built.backend_address == "127.0.0.1:8888"
+    assert built.gateway_address == ""
 
 
 def test_host_network_loopback_remap_requires_override_var() -> None:
@@ -79,8 +99,10 @@ def test_host_network_loopback_remap_injects_port_override_env_var() -> None:
     )
     built = build_argv(spec, None, {}, allocated_port=23456, repo_dir=Path("/tmp"))
     assert "-p" not in built.argv
+    assert "dgx-hub-net" not in built.argv
     assert "SERVING_PORT=23456" in built.argv
     assert built.backend_address == "127.0.0.1:23456"
+    assert built.gateway_address == ""
 
 
 def test_extra_args_are_shlex_split_into_command_not_env() -> None:

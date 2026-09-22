@@ -13,7 +13,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from dgx_hub.gateway import lifecycle
+from dgx_hub.gateway import lifecycle, litellm_config
 from dgx_hub.gateway.compose import gateway_paths, read_env_file
 from dgx_hub.gateway.litellm_admin import LiteLLMAdminClient
 from dgx_hub.gateway.reconcile import reconcile
@@ -34,9 +34,6 @@ def _admin_client() -> LiteLLMAdminClient:
 def gateway_start(
     host: str = typer.Option("0.0.0.0", "--host", help="Interface litellm binds"),
     port: int = typer.Option(8888, "--port", help="Public port litellm listens on"),
-    postgres_port: int = typer.Option(
-        5442, "--postgres-port", help="Host-loopback port for the backing Postgres"
-    ),
     timeout: float = typer.Option(
         60.0, "--timeout", help="Seconds to wait for litellm to report healthy"
     ),
@@ -44,9 +41,7 @@ def gateway_start(
     """Start the Postgres + LiteLLM proxy infra as Docker containers (needs Docker)."""
     console.print("[bold]gateway[/bold]: starting postgres + litellm...")
     try:
-        paths = lifecycle.start(
-            host=host, litellm_port=port, postgres_port=postgres_port, ready_timeout=timeout
-        )
+        paths = lifecycle.start(host=host, litellm_port=port, ready_timeout=timeout)
     except lifecycle.GatewayLifecycleError as exc:
         console.print(f"[red]gateway: failed to start: {exc}[/red]")
         raise typer.Exit(code=1) from exc
@@ -151,6 +146,48 @@ def gateway_keys_list() -> None:
     console.print(table)
     if not keys:
         console.print("[dim]No keys issued yet. Try `dgx-hub gateway keys create <name>`.[/dim]")
+
+
+def gateway_config_set(
+    key: str = typer.Argument(
+        ..., help="Dotted litellm config key, e.g. general_settings.disable_env_credential_login"
+    ),
+    value: str = typer.Argument(..., help="Value to set (true/false/number/string)"),
+) -> None:
+    """Set a key in the gateway's litellm config.yaml.
+
+    Only `general_settings`/`litellm_settings` -- `model_list` is managed
+    separately at runtime by `gateway sync`, not this file. Requires
+    `dgx-hub gateway stop && dgx-hub gateway start` to take effect: litellm
+    only reads this file at startup.
+    """
+    try:
+        coerced = litellm_config.set_value(key, value)
+    except litellm_config.LiteLLMConfigError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from exc
+
+    console.print(f"[green]{key}[/green] = {coerced!r}")
+    console.print(
+        "[dim]restart the gateway for this to take effect: "
+        "`dgx-hub gateway stop && dgx-hub gateway start`[/dim]"
+    )
+
+
+def gateway_config_get(
+    key: str = typer.Argument(..., help="Dotted litellm config key"),
+) -> None:
+    """Read a key from the gateway's litellm config.yaml."""
+    try:
+        value = litellm_config.get_value(key)
+    except litellm_config.LiteLLMConfigError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from exc
+
+    if value is None:
+        console.print(f"[dim]{key} is not set[/dim]")
+    else:
+        console.print(f"{key} = {value!r}")
 
 
 def gateway_logs(

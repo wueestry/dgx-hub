@@ -66,6 +66,12 @@ dgx-hub gateway keys list
 # Push ground-truth model routes into LiteLLM right now (also runs automatically
 # after `start`/`stop`/`status` once the gateway is up)
 dgx-hub gateway sync
+
+# Read/set general_settings or litellm_settings keys in litellm's own config.yaml
+# (model_list isn't here -- see `gateway sync` above). Restart the gateway to
+# apply: litellm only reads this file at startup.
+dgx-hub gateway config set general_settings.disable_env_credential_login true
+dgx-hub gateway config get general_settings.disable_env_credential_login
 ```
 
 LiteLLM's model list is managed entirely through its admin API by the reconciler in `gateway/reconcile.py` — `dgx-hub gateway`'s own `litellm-config.yaml` (written once under the gateway's config directory) only holds `general_settings`/`litellm_settings`, not `model_list`.

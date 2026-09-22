@@ -76,8 +76,10 @@ services:
       POSTGRES_USER: litellm
       POSTGRES_PASSWORD: ${{POSTGRES_PASSWORD}}
       POSTGRES_DB: litellm
-    ports:
-      - "127.0.0.1:${{POSTGRES_PORT}}:5432"
+    # No published port -- reachable only from litellm, by service name, on
+    # dgx-hub-net. Nothing outside the gateway's own containers needs it.
+    networks:
+      - dgx-hub-net
     volumes:
       - dgx-hub-gateway-postgres:/var/lib/postgresql/data
 
@@ -87,14 +89,21 @@ services:
     # needed for virtual-key/spend-tracking tables to exist.
     image: ghcr.io/berriai/litellm-database:main-stable
     restart: unless-stopped
-    # Host networking so this container can reach model backends bound to
-    # 127.0.0.1:<port> on the host -- exactly like the CLI's own in-process
-    # gateway does today. A sibling bridge-network container cannot reach
-    # those loopback-bound ports.
-    network_mode: host
+    # dgx-hub-net (not network_mode: host) so this container is reachable
+    # from the real host under rootless Docker too -- host networking there
+    # shares RootlessKit's private namespace, not the actual host, and
+    # Docker discards `ports:` outright whenever network_mode: host is set,
+    # so the two can't be combined. Model backends join this same network
+    # (see launch/docker_run.py) so litellm can still reach them by
+    # container name/gateway_address, regardless of which Docker flavor is
+    # running underneath.
+    networks:
+      - dgx-hub-net
+    ports:
+      - "${{LITELLM_HOST}}:${{LITELLM_PORT}}:${{LITELLM_PORT}}"
     environment:
       LITELLM_MASTER_KEY: ${{LITELLM_MASTER_KEY}}
-      DATABASE_URL: postgresql://litellm:${{POSTGRES_PASSWORD}}@127.0.0.1:${{POSTGRES_PORT}}/litellm
+      DATABASE_URL: postgresql://litellm:${{POSTGRES_PASSWORD}}@postgres:5432/litellm
       # Required for the /model/new and /model/delete admin endpoints the
       # reconciler drives -- without it they 500 rather than persisting to
       # the DB-backed model list.
@@ -112,13 +121,21 @@ services:
     depends_on:
       - postgres
 
+networks:
+  # Pre-created by `docker_adapter.ensure_network()` before `docker compose
+  # up` runs (gateway/lifecycle.py) -- external because model-backend
+  # containers, started independently by `dgx-hub start`, join the exact
+  # same network (see launch/docker_run.py) and must resolve to it too.
+  dgx-hub-net:
+    external: true
+
 volumes:
   dgx-hub-gateway-postgres:
 """
 
 
-def ensure_gateway_files(litellm_port: int, postgres_port: int, host: str) -> GatewayPaths:
-    """Write the compose file (always, latest ports/host) and .env (secrets
+def ensure_gateway_files(litellm_port: int, host: str) -> GatewayPaths:
+    """Write the compose file (always, latest port/host) and .env (secrets
     persisted across calls, generated once). The litellm config file is
     written only if missing, so hand edits to it survive restarts.
     """
@@ -132,7 +149,6 @@ def ensure_gateway_files(litellm_port: int, postgres_port: int, host: str) -> Ga
     paths.env_file.write_text(
         f"LITELLM_MASTER_KEY={master_key}\n"
         f"POSTGRES_PASSWORD={postgres_password}\n"
-        f"POSTGRES_PORT={postgres_port}\n"
         f"LITELLM_PORT={litellm_port}\n"
         f"LITELLM_HOST={host}\n"
     )

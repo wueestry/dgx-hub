@@ -15,6 +15,7 @@ dependencies = [
     "questionary>=2.0",
     "tomlkit>=0.13",
     "platformdirs>=4.2",
+    "ruamel-yaml>=0.18",
 ]
 
 [project.optional-dependencies]

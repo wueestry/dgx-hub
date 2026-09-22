@@ -126,6 +126,7 @@ def launch_and_wait(
             handle = status.handle
             record.container_name = handle.container_name
             record.backend_address = handle.backend_address
+            record.gateway_address = handle.gateway_address
             record.kind = handle.kind.value
             record.compose_project = handle.compose_project
             record.compose_file = str(handle.compose_file) if handle.compose_file else None

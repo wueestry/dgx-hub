@@ -32,10 +32,13 @@ class GatewayLifecycleError(RuntimeError):
 def start(
     host: str = "0.0.0.0",
     litellm_port: int = 8888,
-    postgres_port: int = 5442,
     ready_timeout: float = 60.0,
 ) -> GatewayPaths:
-    paths = ensure_gateway_files(litellm_port, postgres_port, host)
+    paths = ensure_gateway_files(litellm_port, host)
+    # The compose file references dgx-hub-net as `external: true` (postgres
+    # and litellm both join it, and so do model-backend containers started
+    # separately by `dgx-hub start`) -- it must already exist before `up`.
+    docker_adapter.ensure_network()
 
     result = subprocess.run(
         [

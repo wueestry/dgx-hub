@@ -32,6 +32,11 @@ gateway_keys_app.command("create")(gateway_cmd.gateway_keys_create)
 gateway_keys_app.command("list")(gateway_cmd.gateway_keys_list)
 gateway_app.add_typer(gateway_keys_app, name="keys")
 
+gateway_config_app = typer.Typer(help="Read/modify the gateway's litellm config.yaml.")
+gateway_config_app.command("set")(gateway_cmd.gateway_config_set)
+gateway_config_app.command("get")(gateway_cmd.gateway_config_get)
+gateway_app.add_typer(gateway_config_app, name="config")
+
 app.add_typer(gateway_app, name="gateway")
 
 

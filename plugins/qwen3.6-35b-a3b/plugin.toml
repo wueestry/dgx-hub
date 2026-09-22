@@ -35,8 +35,12 @@ ports = [{ container_port = 8888, publish_strategy = "loopback-remap" }]
 # not load on Ampere or older GPUs (ModelOpt raises a capability-check error
 # at startup, same failure shape as Nemotron 3 Nano's FP8 variant on this
 # repo's RTX 3070 test box).
+# NOTE: vllm/vllm-openai's image already sets ENTRYPOINT ["vllm", "serve"]
+# (unlike this repo's other vllm-based plugins, which use generic images),
+# so command_args must NOT repeat "vllm", "serve" -- doing so double-invokes
+# it and vllm's argparse errors out ("unrecognized arguments: serve <model>").
 command_args = [
-  "vllm", "serve", "nvidia/Qwen3.6-35B-A3B-NVFP4",
+  "nvidia/Qwen3.6-35B-A3B-NVFP4",
   "--served-model-name", "qwen3.6-35b-a3b",
   "--host", "0.0.0.0",
   "--port", "8888",

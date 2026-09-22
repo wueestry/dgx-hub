@@ -8,6 +8,7 @@ from pathlib import Path
 
 import httpx
 
+from dgx_hub import docker_adapter
 from dgx_hub.launch.docker_compose import build_compose_up, build_generate_command
 from dgx_hub.launch.docker_run import build_argv, merge_variant
 from dgx_hub.plugins.base import (
@@ -15,6 +16,7 @@ from dgx_hub.plugins.base import (
     HealthResult,
     HealthTiming,
     LaunchMode,
+    NetworkMode,
     PluginMetadata,
     ResourceRequirements,
     RunContext,
@@ -76,6 +78,10 @@ class ManifestPlugin:
         if ctx.variant_id is not None:
             variant = self.manifest.get_variant(ctx.variant_id)
 
+        effective = merge_variant(docker_spec, variant)
+        if effective.network_mode != NetworkMode.HOST:
+            docker_adapter.ensure_network()
+
         built = build_argv(
             docker_spec=docker_spec,
             variant=variant,
@@ -89,11 +95,11 @@ class ManifestPlugin:
                 f"failed to start {self.metadata.name!r}: {result.stderr.strip()}"
             )
 
-        effective = merge_variant(docker_spec, variant)
         return ContainerHandle(
             kind=RuntimeKind.DOCKER_RUN,
             container_name=effective.container_name,
             backend_address=built.backend_address,
+            gateway_address=built.gateway_address,
         )
 
     def _run_in_repo(self, argv: list[str], env: dict[str, str]) -> subprocess.CompletedProcess:

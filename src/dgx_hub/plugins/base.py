@@ -70,6 +70,15 @@ class ContainerHandle:
     compose_file: Path | None = None
     service_name: str | None = None
     backend_address: str = ""
+    gateway_address: str = ""
+    """`container_name:container_port` when this backend is attached to the
+    `dgx-hub-net` bridge network dgx-hub's own gateway also joins -- how the
+    LiteLLM gateway reaches it. Empty for `network_mode = host` backends,
+    which can't join a private bridge network at all (Docker restriction),
+    so they're simply not gateway-routable. Distinct from `backend_address`
+    (always host-loopback, used by the CLI's own health checks) because the
+    gateway and the CLI process run in different network namespaces.
+    """
 
 
 @dataclass(frozen=True)

@@ -29,6 +29,10 @@ class ModelRunRecord:
     """Model id(s) the backend's own /v1/models reported it serves — what
     the gateway routes on. Falls back to the plugin name if discovery
     fails (e.g. the backend isn't OpenAI-/v1/models-compatible)."""
+    gateway_address: str = ""
+    """See ContainerHandle.gateway_address. Empty for records saved before
+    this field existed or for network_mode=host backends -- both cases are
+    simply excluded from the gateway's routing table until re-started."""
 
     def to_handle(self) -> ContainerHandle:
         """Reconstruct the ContainerHandle this record described, so
@@ -42,6 +46,7 @@ class ModelRunRecord:
             compose_file=Path(self.compose_file) if self.compose_file else None,
             service_name=self.service_name,
             backend_address=self.backend_address,
+            gateway_address=self.gateway_address,
         )
 
 

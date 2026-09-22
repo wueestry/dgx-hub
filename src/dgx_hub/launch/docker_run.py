@@ -16,6 +16,7 @@ from dgx_hub.plugins.manifest import DockerSpec, VariantSpec
 class BuiltCommand:
     argv: list[str]
     backend_address: str
+    gateway_address: str = ""
 
 
 def merge_variant(docker_spec: DockerSpec, variant: VariantSpec | None) -> DockerSpec:
@@ -113,6 +114,7 @@ def build_argv(
             argv += ["-e", f"{name}={host_value}"]
 
     backend_address = ""
+    gateway_address = ""
     if spec.network_mode == NetworkMode.HOST:
         for port in spec.ports:
             if port.publish_strategy == "loopback-remap":
@@ -134,7 +136,19 @@ def build_argv(
                     f"unsupported publish_strategy for network_mode=host: "
                     f"{port.publish_strategy!r}"
                 )
+        # `network_mode = host` has no private bridge network to join (Docker
+        # rejects combining `--network host` with any other `--network`), so
+        # these backends are never gateway_address-reachable -- accepted
+        # limitation, not something later code should try to work around.
     else:
+        # Always join dgx-hub-net (requires docker_adapter.ensure_network to
+        # have been called first) in addition to whatever `-p` publishing the
+        # strategy below adds -- the two aren't mutually exclusive outside
+        # host networking. This keeps `backend_address` (host-loopback, what
+        # the CLI's own health checks/dashboard use) unchanged while also
+        # giving the gateway a path in that doesn't depend on sharing the
+        # CLI's/gateway's network namespace with this container.
+        argv += ["--network", "dgx-hub-net"]
         for port in spec.ports:
             if port.publish_strategy == "loopback-remap":
                 host_port = allocated_port or port.container_port
@@ -146,15 +160,18 @@ def build_argv(
                 if not backend_address:
                     backend_address = f"127.0.0.1:{port.container_port}"
             elif port.publish_strategy == "gateway-network":
-                # Requires a pre-created `dgx-hub-net` bridge network
-                # (docker_adapter.ensure_network); no host port is published.
-                argv += ["--network", "dgx-hub-net"]
+                # No host port at all -- only reachable via dgx-hub-net, so
+                # the CLI's own health checks/discovery won't be able to
+                # reach this backend directly (unlike loopback-remap/
+                # fixed-exclusive, which stay reachable there too).
                 if not backend_address:
                     backend_address = f"{spec.container_name}:{port.container_port}"
             else:
                 raise ValueError(f"unknown publish_strategy: {port.publish_strategy!r}")
+            if not gateway_address:
+                gateway_address = f"{spec.container_name}:{port.container_port}"
 
     argv.append(spec.image)
     argv += command_args
 
-    return BuiltCommand(argv=argv, backend_address=backend_address)
+    return BuiltCommand(argv=argv, backend_address=backend_address, gateway_address=gateway_address)
