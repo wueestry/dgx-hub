@@ -1,5 +1,5 @@
 [plugin]
-name = "ornith-1-5-35b-a3b"
+name = "ornith1.5-35b-a3b"
 display_name = "Ornith-1.5 35B-A3B (vLLM, NVFP4)"
 description = "vLLM (b12x MoE backend) server for Ornith-1.5-35B-A3B NVFP4 with in-checkpoint MTP speculative decoding and up to 256k context on a single DGX Spark"
 docs_url = "https://github.com/MiaAI-Lab/Ornith-1.5-35B-A3B-DGX-Spark"

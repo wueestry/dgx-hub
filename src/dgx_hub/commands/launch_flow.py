@@ -9,6 +9,7 @@ import typer
 from rich.console import Console
 
 from dgx_hub.launch.docker_run import merge_variant
+from dgx_hub.logging_config import get_logger, log_file_path
 from dgx_hub.plugins.base import RunContext
 from dgx_hub.plugins.loader import discover_plugins
 from dgx_hub.plugins.manifest import PluginManifest
@@ -19,6 +20,7 @@ from dgx_hub.process.supervisor import ModelSupervisor
 from dgx_hub.ui.dashboard import run_dashboard
 
 console = Console()
+logger = get_logger(__name__)
 
 # States a currently-claimed port/container_name should still be treated as
 # "in use" for — i.e. everything except a definitively finished run.
@@ -74,6 +76,7 @@ def launch_and_wait(
 
         conflict = conflict_check(manifest, running)
         if conflict:
+            logger.error("%s: %s", name, conflict)
             console.print(f"[red]{conflict}[/red]")
             raise typer.Exit(code=1)
 
@@ -90,6 +93,14 @@ def launch_and_wait(
             else port_registry.allocate_port(claimed_ports, preferred=preferred_port)
         )
         claimed_ports.add(allocated_port)
+        logger.info(
+            "%s: resolved variant=%r container_name=%r port=%d (%s)",
+            name,
+            variant_id,
+            effective.container_name,
+            allocated_port,
+            publish_strategy,
+        )
 
         ctx = RunContext(
             repo_dir=plugin.repo_dir,
@@ -112,7 +123,11 @@ def launch_and_wait(
         running[name] = record
         state_store.save(record)
 
-    console.print(f"Starting {len(supervisors)} model(s)...")
+    console.print(
+        f"Starting {len(supervisors)} model(s)... "
+        f"(detailed startup logs: {log_file_path()})"
+    )
+    logger.info("starting %d model(s): %s", len(supervisors), ", ".join(supervisors))
     for supervisor in supervisors.values():
         supervisor.start()
 

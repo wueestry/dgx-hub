@@ -7,9 +7,12 @@ import subprocess
 from collections.abc import Iterator
 from dataclasses import dataclass
 
+from dgx_hub.logging_config import get_logger
 from dgx_hub.plugins.base import ContainerHandle, RuntimeKind
 
 DEFAULT_GATEWAY_NETWORK = "dgx-hub-net"
+
+logger = get_logger(__name__)
 
 
 class DockerAdapterError(RuntimeError):
@@ -66,9 +69,33 @@ def stop(handle: ContainerHandle, grace_seconds: int = 30) -> None:
             str(grace_seconds),
             _identity(handle),
         ]
+    logger.info("stopping %s: %s", _identity(handle), " ".join(argv))
     result = subprocess.run(argv, capture_output=True, text=True, check=False)
     if result.returncode != 0 and "No such container" not in result.stderr:
+        logger.error("stop failed for %s: %s", _identity(handle), result.stderr.strip())
         raise DockerAdapterError(f"stop failed: {result.stderr.strip()}")
+
+
+def remove(handle: ContainerHandle, force: bool = False) -> None:
+    """Remove a stopped container/service, freeing its name for reuse.
+
+    Docker never removes a `docker run --name X` container on `docker
+    stop` — it just leaves it exited. Starting the same plugin again then
+    fails with `Conflict. The container name "/X" is already in use`
+    unless that leftover container is removed first.
+    """
+    if handle.kind == RuntimeKind.DOCKER_RUN:
+        argv = ["docker", "rm"]
+        if force:
+            argv.append("--force")
+        argv.append(_identity(handle))
+    else:
+        argv = [*_compose_base_argv(handle), "rm", "-f", _identity(handle)]
+    logger.info("removing %s: %s", _identity(handle), " ".join(argv))
+    result = subprocess.run(argv, capture_output=True, text=True, check=False)
+    if result.returncode != 0 and "No such container" not in result.stderr:
+        logger.error("remove failed for %s: %s", _identity(handle), result.stderr.strip())
+        raise DockerAdapterError(f"remove failed: {result.stderr.strip()}")
 
 
 def _docker_inspect(name: str) -> dict | None:
@@ -151,11 +178,14 @@ def ensure_network(name: str = DEFAULT_GATEWAY_NETWORK) -> None:
         ["docker", "network", "inspect", name], capture_output=True, text=True, check=False
     )
     if check.returncode == 0:
+        logger.debug("network %r already exists", name)
         return
+    logger.info("creating network %r", name)
     create = subprocess.run(
         ["docker", "network", "create", name], capture_output=True, text=True, check=False
     )
     if create.returncode != 0:
+        logger.error("failed to create network %r: %s", name, create.stderr.strip())
         raise DockerAdapterError(
             f"failed to create network {name!r}: {create.stderr.strip()}"
         )

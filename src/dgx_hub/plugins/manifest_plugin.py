@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -11,6 +12,7 @@ import httpx
 from dgx_hub import docker_adapter
 from dgx_hub.launch.docker_compose import build_compose_up, build_generate_command
 from dgx_hub.launch.docker_run import build_argv, merge_variant
+from dgx_hub.logging_config import get_logger
 from dgx_hub.plugins.base import (
     ContainerHandle,
     HealthResult,
@@ -23,6 +25,8 @@ from dgx_hub.plugins.base import (
     RuntimeKind,
 )
 from dgx_hub.plugins.manifest import DockerSpec, PluginManifest
+
+logger = get_logger(__name__)
 
 
 class ManifestPluginError(RuntimeError):
@@ -55,14 +59,30 @@ class ManifestPlugin:
     def provision(self, ctx: RunContext) -> None:
         spec = self.manifest.provision
         if spec is None:
+            logger.debug("%s: no [provision] step declared, skipping", self.metadata.name)
             return
+        logger.info(
+            "%s: provisioning: %s (cwd=%s)",
+            self.metadata.name,
+            shlex.join(spec.command),
+            self.repo_dir,
+        )
         result = subprocess.run(
             spec.command, cwd=self.repo_dir, capture_output=True, text=True, check=False
         )
+        if result.stdout:
+            logger.debug("%s: provision stdout:\n%s", self.metadata.name, result.stdout.strip())
         if result.returncode != 0:
+            logger.error(
+                "%s: provisioning failed (exit %d): %s",
+                self.metadata.name,
+                result.returncode,
+                result.stderr.strip(),
+            )
             raise ManifestPluginError(
                 f"provisioning for {self.metadata.name!r} failed: {result.stderr.strip()}"
             )
+        logger.info("%s: provisioning finished", self.metadata.name)
 
     def start(self, ctx: RunContext) -> ContainerHandle:
         if self.manifest.fallback.enabled:
@@ -82,6 +102,8 @@ class ManifestPlugin:
         if effective.network_mode != NetworkMode.HOST:
             docker_adapter.ensure_network()
 
+        self._reclaim_stale_container_name(effective.container_name)
+
         built = build_argv(
             docker_spec=docker_spec,
             variant=variant,
@@ -89,11 +111,24 @@ class ManifestPlugin:
             allocated_port=ctx.allocated_port,
             repo_dir=self.repo_dir,
         )
+        logger.info("%s: starting: %s", self.metadata.name, shlex.join(built.argv))
         result = subprocess.run(built.argv, capture_output=True, text=True, check=False)
         if result.returncode != 0:
+            logger.error(
+                "%s: docker run failed (exit %d): %s",
+                self.metadata.name,
+                result.returncode,
+                result.stderr.strip(),
+            )
             raise ManifestPluginError(
                 f"failed to start {self.metadata.name!r}: {result.stderr.strip()}"
             )
+        logger.info(
+            "%s: container %s started (id=%s)",
+            self.metadata.name,
+            effective.container_name,
+            result.stdout.strip(),
+        )
 
         return ContainerHandle(
             kind=RuntimeKind.DOCKER_RUN,
@@ -101,6 +136,35 @@ class ManifestPlugin:
             backend_address=built.backend_address,
             gateway_address=built.gateway_address,
         )
+
+    def _reclaim_stale_container_name(self, container_name: str | None) -> None:
+        """Remove a leftover exited container occupying `container_name`.
+
+        `docker stop` (used by `dgx-hub stop`) never removes the container,
+        just stops it -- so `docker run --name X` on the next `dgx-hub
+        start` hits `Conflict. The container name "/X" is already in use`.
+        A container that's still running under that name is left alone and
+        reported as a real conflict instead of force-removed out from under
+        whatever is using it.
+        """
+        if not container_name:
+            return
+        handle = ContainerHandle(kind=RuntimeKind.DOCKER_RUN, container_name=container_name)
+        existing = docker_adapter.status(handle)
+        if not existing.exists:
+            return
+        if existing.running:
+            raise ManifestPluginError(
+                f"{self.metadata.name!r}: a container named {container_name!r} is already "
+                "running outside dgx-hub's tracked state; stop it manually "
+                "(`docker stop`/`docker rm`) before starting again"
+            )
+        logger.info(
+            "%s: removing stale exited container %r left behind by a previous stop",
+            self.metadata.name,
+            container_name,
+        )
+        docker_adapter.remove(handle)
 
     def _run_in_repo(self, argv: list[str], env: dict[str, str]) -> subprocess.CompletedProcess:
         return subprocess.run(
@@ -110,19 +174,34 @@ class ManifestPlugin:
     def _start_via_compose(self, ctx: RunContext, docker_spec: DockerSpec) -> ContainerHandle:
         if docker_spec.mode == LaunchMode.COMPOSE_GENERATED:
             gen_argv, gen_env = build_generate_command(docker_spec, ctx.env_values)
+            logger.info("%s: generating compose file: %s", self.metadata.name, shlex.join(gen_argv))
             gen_result = self._run_in_repo(gen_argv, gen_env)
             if gen_result.returncode != 0:
+                logger.error(
+                    "%s: compose generation failed (exit %d): %s",
+                    self.metadata.name,
+                    gen_result.returncode,
+                    gen_result.stderr.strip(),
+                )
                 raise ManifestPluginError(
                     f"compose generation for {self.metadata.name!r} failed: "
                     f"{gen_result.stderr.strip()}"
                 )
 
         built = build_compose_up(docker_spec, ctx.env_values, ctx.allocated_port)
+        logger.info("%s: starting: %s", self.metadata.name, shlex.join(built.argv))
         result = self._run_in_repo(built.argv, built.env)
         if result.returncode != 0:
+            logger.error(
+                "%s: docker compose up failed (exit %d): %s",
+                self.metadata.name,
+                result.returncode,
+                result.stderr.strip(),
+            )
             raise ManifestPluginError(
                 f"failed to start {self.metadata.name!r}: {result.stderr.strip()}"
             )
+        logger.info("%s: compose stack started", self.metadata.name)
 
         return ContainerHandle(
             kind=RuntimeKind.DOCKER_COMPOSE,
@@ -160,13 +239,30 @@ class ManifestPlugin:
         if port_var and ctx.allocated_port:
             env[port_var] = str(ctx.allocated_port)
 
+        logger.info(
+            "%s: starting via fallback: %s (cwd=%s)",
+            self.metadata.name,
+            shlex.join(command),
+            self.repo_dir,
+        )
         result = subprocess.run(
             command, cwd=self.repo_dir, env=env, capture_output=True, text=True, check=False
         )
+        if result.stdout:
+            logger.debug(
+                "%s: fallback start stdout:\n%s", self.metadata.name, result.stdout.strip()
+            )
         if result.returncode != 0:
+            logger.error(
+                "%s: fallback start failed (exit %d): %s",
+                self.metadata.name,
+                result.returncode,
+                result.stderr.strip(),
+            )
             raise ManifestPluginError(
                 f"fallback start for {self.metadata.name!r} failed: {result.stderr.strip()}"
             )
+        logger.info("%s: fallback start finished", self.metadata.name)
 
         docker_spec = self.manifest.docker
         backend_address = ""

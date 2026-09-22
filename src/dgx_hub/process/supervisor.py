@@ -10,7 +10,10 @@ from typing import Any
 
 from dgx_hub import docker_adapter
 from dgx_hub.gateway import auto_sync
+from dgx_hub.logging_config import get_logger
 from dgx_hub.plugins.base import ContainerHandle, ModelPlugin, ModelState, RunContext
+
+logger = get_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -70,28 +73,52 @@ class ModelSupervisor:
         self._stop_event.set()
 
     def _run(self) -> None:
+        logger.info("%s: supervisor starting (provision -> start -> health-poll)", self.name)
         try:
-            self._update(state=ModelState.PROVISIONING, started_at=datetime.now(UTC))
+            self._update(
+                state=ModelState.PROVISIONING,
+                started_at=datetime.now(UTC),
+                message="running provisioning step",
+            )
             self.plugin.provision(self.ctx)
 
-            self._update(state=ModelState.STARTING)
+            self._update(state=ModelState.STARTING, message="starting container")
             handle = self.plugin.start(self.ctx)
-            self._update(handle=handle)
+            logger.info(
+                "%s: start() returned handle container_name=%r backend=%r",
+                self.name,
+                handle.container_name,
+                handle.backend_address,
+            )
+            self._update(
+                handle=handle,
+                message=f"waiting for {handle.container_name or self.name} to report running",
+            )
 
             self._wait_for_container_running(handle, timeout=self.container_start_timeout)
 
-            self._update(state=ModelState.WARMING_UP)
+            self._update(state=ModelState.WARMING_UP, message="")
             self._poll_until_serving(handle)
+            logger.info("%s: supervisor finished with state=%s", self.name, self.status.state.value)
         except Exception as exc:
+            logger.error("%s: supervisor failed: %s", self.name, exc)
             self._update(state=ModelState.FAILED, error=str(exc))
         finally:
             auto_sync.try_reconcile_quietly()
 
     def _wait_for_container_running(self, handle: ContainerHandle, timeout: float = 60.0) -> None:
         deadline = time.monotonic() + timeout
+        started = time.monotonic()
         while True:
             if docker_adapter.status(handle).running:
+                logger.info(
+                    "%s: container reached running state after %.1fs",
+                    self.name,
+                    time.monotonic() - started,
+                )
                 return
+            elapsed = time.monotonic() - started
+            self._update(message=f"waiting for container to start ({elapsed:.0f}s)")
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break
@@ -108,8 +135,16 @@ class ModelSupervisor:
         while True:
             result = self.plugin.health_check(self.ctx, handle)
             elapsed = time.monotonic() - started
+            logger.debug(
+                "%s: health check at %.0fs: healthy=%s detail=%r",
+                self.name,
+                elapsed,
+                result.healthy,
+                result.detail,
+            )
 
             if result.healthy:
+                logger.info("%s: became healthy after %.0fs", self.name, elapsed)
                 self._update(state=ModelState.SERVING, message="", error=None)
                 return
 
