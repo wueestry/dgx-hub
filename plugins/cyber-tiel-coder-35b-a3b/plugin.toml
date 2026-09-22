@@ -1,0 +1,107 @@
+[plugin]
+name = "cyber-tiel-coder-35b-a3b"
+display_name = "Cyber-Tiel Coder 35B-A3B (GGUF, MTP)"
+description = "llama.cpp GGUF server for Cyber-Tiel-Coder-35B-A3B: an abliterated, cybersecurity/agentic-coding fine-tune of this repo's own Ornith-1.5-35B-A3B (Qwen35moe MoE), with a grafted MTP speculative-decoding head (~1.21x decode, 82% single-token acceptance per the model card) and up to 262144-token context"
+docs_url = "https://huggingface.co/peculiar-ragdoll/Cyber-Tiel-Coder-35B-A3B-GGUF-MTP"
+schema_version = 1
+
+# Abliterated (refusal-removed) checkpoint aimed at unguided cybersecurity/CTF
+# and agentic-coding use (model card reports 35% on unguided Cybench, ~70%
+# more SWE-bench-Live solves than unoptimized Ornith-1.5) -- upstream is
+# explicit that deployers own sandboxing/safety for this one, same spirit as
+# the [env.ABLATE] toggle on this repo's deepseek-v4-flash-spark plugin.
+
+[source]
+repo_url = "https://huggingface.co/peculiar-ragdoll/Cyber-Tiel-Coder-35B-A3B-GGUF-MTP"
+
+# No [provision] section: `-hf` downloads and caches the selected GGUF quant
+# tier into the HF cache volume below on first container start, same as
+# nemotron-3-nano-4b's gguf variant.
+# No [[patch]] entries: fully declarable via [docker] below.
+
+[docker]
+mode = "docker-run"
+image = "ghcr.io/ggml-org/llama.cpp:server-cuda"
+container_name = "cyber-tiel-coder-35b-a3b"
+network_mode = "bridge"
+gpus = "all"
+ipc = "host"
+volumes = ["dgx-hub-cyber-tiel-hf-cache:/root/.cache/huggingface"]
+env_passthrough = ["HF_TOKEN"]
+ports = [{ container_port = 8888, publish_strategy = "loopback-remap" }]
+# Model card's recommended launch command, quant tier swapped per [[variant]]
+# below. --spec-type draft-mtp turns on the grafted MTP head; without it the
+# ~0.4 GiB head is just dead weight. Sampling defaults (temp/top-p/top-k) are
+# the model card's own recommended values.
+command_args = [
+  "-hf", "peculiar-ragdoll/Cyber-Tiel-Coder-35B-A3B-GGUF-MTP:Q4_K_XL",
+  "--host", "0.0.0.0",
+  "--port", "8888",
+  "--alias", "cyber-tiel-coder-35b-a3b",
+  "-ngl", "99",
+  "--jinja",
+  "--ctx-size", "262144",
+  "--spec-type", "draft-mtp",
+  "--temp", "0.6",
+  "--top-p", "0.95",
+  "--top-k", "20",
+]
+
+[[variant]]
+id = "q4-k-xl"
+label = "Q4_K_XL (default, 22.7 GiB, recommended balance of quality vs. context headroom)"
+default = true
+# inherits [docker] as-is
+
+[[variant]]
+id = "q5-k-xl"
+label = "Q5_K_XL (27 GiB, for 32 GiB systems)"
+docker_overrides = { command_args = [
+  "-hf", "peculiar-ragdoll/Cyber-Tiel-Coder-35B-A3B-GGUF-MTP:Q5_K_XL",
+  "--host", "0.0.0.0",
+  "--port", "8888",
+  "--alias", "cyber-tiel-coder-35b-a3b",
+  "-ngl", "99",
+  "--jinja",
+  "--ctx-size", "262144",
+  "--spec-type", "draft-mtp",
+  "--temp", "0.6",
+  "--top-p", "0.95",
+  "--top-k", "20",
+] }
+
+[[variant]]
+id = "iq3-xxs"
+label = "IQ3_XXS (13.6 GiB, fits 16 GiB RAM+VRAM budgets)"
+docker_overrides = { command_args = [
+  "-hf", "peculiar-ragdoll/Cyber-Tiel-Coder-35B-A3B-GGUF-MTP:IQ3_XXS",
+  "--host", "0.0.0.0",
+  "--port", "8888",
+  "--alias", "cyber-tiel-coder-35b-a3b",
+  "-ngl", "99",
+  "--jinja",
+  "--ctx-size", "262144",
+  "--spec-type", "draft-mtp",
+  "--temp", "0.6",
+  "--top-p", "0.95",
+  "--top-k", "20",
+] }
+
+[health]
+url = "http://{backend_address}/health"
+interval_seconds = 5
+timeout_seconds = 5
+startup_grace_seconds = 60
+expected_first_boot_seconds = 1800
+
+[resources]
+# Q4_K_XL default weights ~22.7 GiB (Q5_K_XL, the largest offered tier, tops
+# out at ~27 GiB) plus the ~0.4 GiB MTP head and image layers.
+min_free_disk_gib = 40
+min_free_memory_gib = 30
+gpu_required = true
+
+[env.EXTRA_ARGS]
+type = "string"
+default = ""
+description = "Free-form escape hatch appended after the baked-in llama-server flags (its arg parser takes the last occurrence of a repeated flag, so this also overrides defaults above, e.g. '--ctx-size 65536'). Use this for '--n-cpu-moe N' to offload routed experts to CPU on tighter VRAM budgets -- per the model card, N must stay <=40 or the MTP draft head itself gets pushed to CPU and the speculative-decoding speedup disappears."
