@@ -1,10 +1,4 @@
-"""Push registry.current_routes() into LiteLLM's live model list.
-
-Replaces the old proxy's per-request lookup: instead of consulting ground
-truth on every incoming chat completion, whatever calls this (an explicit
-`dgx-hub gateway sync`, or the auto-sync hooks in commands/process) pushes
-the current diff into LiteLLM via its model-admin API.
-"""
+"""Push registry.current_routes() into LiteLLM's live model list."""
 
 from __future__ import annotations
 

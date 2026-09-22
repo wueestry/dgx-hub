@@ -1,10 +1,4 @@
-"""Generates and locates the Postgres + LiteLLM proxy compose stack.
-
-This is gateway infrastructure, not a model — it deliberately doesn't go
-through the plugin system, ModelSupervisor, or the state store used for
-model backends. There's exactly one of it, its identity is fixed, and it
-never appears in `dgx-hub list`/`status`/the interactive picker.
-"""
+"""Generates and locates the Postgres + LiteLLM proxy compose stack."""
 
 from __future__ import annotations
 

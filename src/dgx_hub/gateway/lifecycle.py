@@ -1,10 +1,4 @@
-"""Start/stop/status/logs for the gateway's Postgres + LiteLLM infra.
-
-Kept separate from process/supervisor.py: that module owns per-model
-provision -> start -> health-poll, driven by the plugin system. This is two
-fixed infrastructure containers with no plugin, no variant, and no state-store
-record -- `docker_adapter` (used generically, same as for models) is enough.
-"""
+"""Start/stop/status/logs for the gateway's Postgres + LiteLLM infra."""
 
 from __future__ import annotations
 
@@ -35,9 +29,6 @@ def start(
     ready_timeout: float = 60.0,
 ) -> GatewayPaths:
     paths = ensure_gateway_files(litellm_port, host)
-    # The compose file references dgx-hub-net as `external: true` (postgres
-    # and litellm both join it, and so do model-backend containers started
-    # separately by `dgx-hub start`) -- it must already exist before `up`.
     docker_adapter.ensure_network()
 
     result = subprocess.run(

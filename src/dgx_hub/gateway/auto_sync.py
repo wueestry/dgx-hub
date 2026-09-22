@@ -1,13 +1,4 @@
-"""Best-effort LiteLLM reconciliation triggered from ordinary CLI commands.
-
-This is a no-op — no network calls at all — unless `dgx-hub gateway start`
-has been run at least once (its .env holds the master key/port). A user who
-has never touched the gateway sees zero behavioral change from this. When
-the gateway *is* running, called from commands/stop.py, commands/status.py,
-and process/supervisor.py so LiteLLM's model list stays current without a
-per-request lookup; failures (gateway not currently up, network hiccup) are
-swallowed since none of those commands' primary jobs depend on it.
-"""
+"""Best-effort LiteLLM reconciliation triggered from ordinary CLI commands."""
 
 from __future__ import annotations
 

@@ -1,12 +1,4 @@
-"""File-based logging for dgx-hub.
-
-`dgx-hub start` renders a live Rich dashboard that owns the terminal, so
-anything more detailed than the dashboard's one-line "Detail" column has
-nowhere to go on stdout without corrupting that display. Every step worth
-recording in detail (provisioning commands, the exact `docker run` argv,
-stale-container cleanup, subprocess stdout/stderr) goes to a log file
-instead, via `get_logger(__name__)`.
-"""
+"""File-based logging for dgx-hub."""
 
 from __future__ import annotations
 

@@ -1,11 +1,4 @@
-"""`dgx-hub gateway ...` — the OpenAI-compatible routing gateway.
-
-`start`/`stop`/`status`/`logs` manage the Postgres + LiteLLM proxy infra
-that actually proxies `/v1/...` traffic; `sync` and the auto-sync hooks in
-commands/process (see gateway/auto_sync.py) keep LiteLLM's model list
-matched to dgx-hub's own ground truth; `keys` issues/lists virtual API keys
-for calling it.
-"""
+"""`dgx-hub gateway ...` — the OpenAI-compatible routing gateway."""
 
 from __future__ import annotations
 
@@ -83,11 +76,7 @@ def gateway_status() -> None:
 
 
 def gateway_sync() -> None:
-    """Push ground-truth model routes into LiteLLM's model list right now.
-
-    Also runs automatically after `dgx-hub start`/`stop`/`status` once the
-    gateway infra is up — this is for manual recovery or scripting.
-    """
+    """Push ground-truth model routes into LiteLLM's model list right now."""
     try:
         with _admin_client() as client:
             result = reconcile(client)
@@ -154,13 +143,7 @@ def gateway_config_set(
     ),
     value: str = typer.Argument(..., help="Value to set (true/false/number/string)"),
 ) -> None:
-    """Set a key in the gateway's litellm config.yaml.
-
-    Only `general_settings`/`litellm_settings` -- `model_list` is managed
-    separately at runtime by `gateway sync`, not this file. Requires
-    `dgx-hub gateway stop && dgx-hub gateway start` to take effect: litellm
-    only reads this file at startup.
-    """
+    """Set a key in the gateway's litellm config.yaml."""
     try:
         coerced = litellm_config.set_value(key, value)
     except litellm_config.LiteLLMConfigError as exc:

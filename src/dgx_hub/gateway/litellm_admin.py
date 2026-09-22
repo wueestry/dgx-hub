@@ -1,10 +1,4 @@
-"""Thin client for LiteLLM proxy's model-admin REST API.
-
-Only the calls the reconciler needs: list what's currently registered, add
-a model pointing at a backend, delete one by id. dgx-hub always sets a
-model's `model_info.id` to its own model_id at creation time, so the
-reconciler never has to look up a server-generated id to delete something.
-"""
+"""Thin client for LiteLLM proxy's model-admin REST API."""
 
 from __future__ import annotations
 

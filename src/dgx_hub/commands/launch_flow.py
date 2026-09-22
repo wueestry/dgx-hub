@@ -28,7 +28,7 @@ ACTIVE_STATES = {"provisioning", "starting", "warming_up", "serving"}
 
 
 def conflict_check(manifest: PluginManifest, running: dict[str, ModelRunRecord]) -> str | None:
-    """SGLang-style variants (and any two plugins) sharing one container_name
+    """Different variants sharing one container_name
     are mutually exclusive by construction — refuse a second one without
     stopping the first, rather than letting Docker's own name clash surface
     as an opaque error later.
