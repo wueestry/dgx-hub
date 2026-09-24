@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 import shlex
-import subprocess
 from pathlib import Path
 
 import httpx
@@ -25,6 +24,8 @@ from dgx_hub.plugins.base import (
     RuntimeKind,
 )
 from dgx_hub.plugins.manifest import DockerSpec, PluginManifest
+from dgx_hub.plugins.patching import apply_patches
+from dgx_hub.process.stream import StreamResult, failure_summary, run_streaming
 
 logger = get_logger(__name__)
 
@@ -48,6 +49,7 @@ class ManifestPlugin:
                 min_free_disk_gib=manifest.resources.min_free_disk_gib,
                 min_free_memory_gib=manifest.resources.min_free_memory_gib,
                 gpu_required=manifest.resources.gpu_required,
+                exclusive_gpu=manifest.resources.exclusive_gpu,
             ),
             health_timing=HealthTiming(
                 interval_seconds=manifest.health.interval_seconds,
@@ -56,7 +58,86 @@ class ManifestPlugin:
             ),
         )
 
+    def _repo_required(self) -> bool:
+        """Whether this plugin's [provision]/[fallback]/[docker] steps
+        actually need `self.repo_dir` to exist. Several manifests declare
+        [source].repo_url purely as documentation (e.g. a Hugging Face
+        checkpoint id, resolved by the image itself at boot) and never touch
+        the clone -- cloning those would be wasted work at best and, for a
+        Hugging Face "repo", a multi-GB weight download at worst.
+        """
+        if self.manifest.provision is not None or self.manifest.patch:
+            return True
+        if self.manifest.fallback.enabled:
+            return True
+        docker = self.manifest.docker
+        if any("${REPO_DIR}" in v for v in docker.volumes) or any(
+            "${REPO_DIR}" in a for a in docker.command_args
+        ):
+            return True
+        for variant in self.manifest.variant:
+            overrides = variant.docker_overrides
+            if overrides.volumes and any("${REPO_DIR}" in v for v in overrides.volumes):
+                return True
+            if overrides.command_args and any(
+                "${REPO_DIR}" in a for a in overrides.command_args
+            ):
+                return True
+        return False
+
+    def _run(
+        self,
+        argv: list[str],
+        ctx: RunContext | None,
+        cwd: Path | None = None,
+        env: dict[str, str] | None = None,
+    ) -> StreamResult:
+        return run_streaming(
+            argv,
+            logger=logger,
+            prefix=self.metadata.name,
+            cwd=cwd,
+            env=env,
+            on_line=ctx.on_output if ctx is not None else None,
+        )
+
+    def _fail(self, what: str, result: StreamResult) -> ManifestPluginError:
+        summary = failure_summary(result.tail)
+        # Every line was already logged as it streamed; only the file needs
+        # the tail again, next to the failure.
+        logger.debug(
+            "%s: %s failed (exit %d); last output:\n%s",
+            self.metadata.name,
+            what,
+            result.returncode,
+            result.output,
+        )
+        return ManifestPluginError(
+            f"{what} for {self.metadata.name!r} failed (exit {result.returncode}): {summary}"
+        )
+
+    def _ensure_repo(self, ctx: RunContext | None = None) -> None:
+        """Clone [source].repo_url into `self.repo_dir` if it isn't there yet.
+
+        Idempotent: an existing directory (from a previous clone) is left
+        alone -- plugins that want fresher sources re-run their own
+        [provision]/[fallback] scripts, which pull/update inside the clone
+        themselves where that matters.
+        """
+        if not self._repo_required() or self.repo_dir.exists():
+            return
+        repo_url = self.manifest.source.repo_url
+        logger.info("%s: cloning %s into %s", self.metadata.name, repo_url, self.repo_dir)
+        self.repo_dir.parent.mkdir(parents=True, exist_ok=True)
+        result = self._run(["git", "clone", "--depth", "1", repo_url, str(self.repo_dir)], ctx)
+        if result.returncode != 0:
+            raise self._fail(f"cloning {repo_url}", result)
+        logger.info("%s: clone finished", self.metadata.name)
+
     def provision(self, ctx: RunContext) -> None:
+        self._ensure_repo(ctx)
+        if self.manifest.patch:
+            apply_patches(self.repo_dir, self.manifest.patch, logger, self.metadata.name)
         spec = self.manifest.provision
         if spec is None:
             logger.debug("%s: no [provision] step declared, skipping", self.metadata.name)
@@ -67,21 +148,9 @@ class ManifestPlugin:
             shlex.join(spec.command),
             self.repo_dir,
         )
-        result = subprocess.run(
-            spec.command, cwd=self.repo_dir, capture_output=True, text=True, check=False
-        )
-        if result.stdout:
-            logger.debug("%s: provision stdout:\n%s", self.metadata.name, result.stdout.strip())
+        result = self._run(spec.command, ctx, cwd=self.repo_dir)
         if result.returncode != 0:
-            logger.error(
-                "%s: provisioning failed (exit %d): %s",
-                self.metadata.name,
-                result.returncode,
-                result.stderr.strip(),
-            )
-            raise ManifestPluginError(
-                f"provisioning for {self.metadata.name!r} failed: {result.stderr.strip()}"
-            )
+            raise self._fail("provisioning", result)
         logger.info("%s: provisioning finished", self.metadata.name)
 
     def start(self, ctx: RunContext) -> ContainerHandle:
@@ -112,23 +181,10 @@ class ManifestPlugin:
             repo_dir=self.repo_dir,
         )
         logger.info("%s: starting: %s", self.metadata.name, shlex.join(built.argv))
-        result = subprocess.run(built.argv, capture_output=True, text=True, check=False)
+        result = self._run(built.argv, ctx)
         if result.returncode != 0:
-            logger.error(
-                "%s: docker run failed (exit %d): %s",
-                self.metadata.name,
-                result.returncode,
-                result.stderr.strip(),
-            )
-            raise ManifestPluginError(
-                f"failed to start {self.metadata.name!r}: {result.stderr.strip()}"
-            )
-        logger.info(
-            "%s: container %s started (id=%s)",
-            self.metadata.name,
-            effective.container_name,
-            result.stdout.strip(),
-        )
+            raise self._fail("docker run", result)
+        logger.info("%s: container %s started", self.metadata.name, effective.container_name)
 
         return ContainerHandle(
             kind=RuntimeKind.DOCKER_RUN,
@@ -166,41 +222,19 @@ class ManifestPlugin:
         )
         docker_adapter.remove(handle)
 
-    def _run_in_repo(self, argv: list[str], env: dict[str, str]) -> subprocess.CompletedProcess:
-        return subprocess.run(
-            argv, cwd=self.repo_dir, env=env, capture_output=True, text=True, check=False
-        )
-
     def _start_via_compose(self, ctx: RunContext, docker_spec: DockerSpec) -> ContainerHandle:
         if docker_spec.mode == LaunchMode.COMPOSE_GENERATED:
             gen_argv, gen_env = build_generate_command(docker_spec, ctx.env_values)
             logger.info("%s: generating compose file: %s", self.metadata.name, shlex.join(gen_argv))
-            gen_result = self._run_in_repo(gen_argv, gen_env)
+            gen_result = self._run(gen_argv, ctx, cwd=self.repo_dir, env=gen_env)
             if gen_result.returncode != 0:
-                logger.error(
-                    "%s: compose generation failed (exit %d): %s",
-                    self.metadata.name,
-                    gen_result.returncode,
-                    gen_result.stderr.strip(),
-                )
-                raise ManifestPluginError(
-                    f"compose generation for {self.metadata.name!r} failed: "
-                    f"{gen_result.stderr.strip()}"
-                )
+                raise self._fail("compose generation", gen_result)
 
         built = build_compose_up(docker_spec, ctx.env_values, ctx.allocated_port)
         logger.info("%s: starting: %s", self.metadata.name, shlex.join(built.argv))
-        result = self._run_in_repo(built.argv, built.env)
+        result = self._run(built.argv, ctx, cwd=self.repo_dir, env=built.env)
         if result.returncode != 0:
-            logger.error(
-                "%s: docker compose up failed (exit %d): %s",
-                self.metadata.name,
-                result.returncode,
-                result.stderr.strip(),
-            )
-            raise ManifestPluginError(
-                f"failed to start {self.metadata.name!r}: {result.stderr.strip()}"
-            )
+            raise self._fail("docker compose up", result)
         logger.info("%s: compose stack started", self.metadata.name)
 
         return ContainerHandle(
@@ -229,6 +263,14 @@ class ManifestPlugin:
                 "start_command is declared"
             )
 
+        docker_spec = self.manifest.docker
+        if docker_spec.network_mode != NetworkMode.HOST:
+            # Mirrors _start_via_docker_run: the repo's own launch script is
+            # expected to join dgx-hub-net itself (see the plugin's own
+            # [[patch]]/docs) so the gateway container can reach it by name;
+            # this only has to exist first.
+            docker_adapter.ensure_network()
+
         command = [
             token.format(variant=ctx.variant_id or "") for token in spec.start_command
         ]
@@ -245,35 +287,45 @@ class ManifestPlugin:
             shlex.join(command),
             self.repo_dir,
         )
-        result = subprocess.run(
-            command, cwd=self.repo_dir, env=env, capture_output=True, text=True, check=False
-        )
-        if result.stdout:
-            logger.debug(
-                "%s: fallback start stdout:\n%s", self.metadata.name, result.stdout.strip()
-            )
+        result = self._run(command, ctx, cwd=self.repo_dir, env=env)
         if result.returncode != 0:
-            logger.error(
-                "%s: fallback start failed (exit %d): %s",
-                self.metadata.name,
-                result.returncode,
-                result.stderr.strip(),
-            )
-            raise ManifestPluginError(
-                f"fallback start for {self.metadata.name!r} failed: {result.stderr.strip()}"
-            )
+            raise self._fail("fallback start", result)
         logger.info("%s: fallback start finished", self.metadata.name)
 
-        docker_spec = self.manifest.docker
         backend_address = ""
+        gateway_address = ""
         if docker_spec.ports:
             port = ctx.allocated_port or docker_spec.ports[0].container_port
             backend_address = f"127.0.0.1:{port}"
+            # Only reachable by name from the gateway's own container if the
+            # repo's script actually joined dgx-hub-net -- true under host
+            # networking regardless (nothing to join), so left empty there
+            # like registry.current_routes() already expects.
+            if docker_spec.network_mode != NetworkMode.HOST and docker_spec.container_name:
+                gateway_address = f"{docker_spec.container_name}:{port}"
         return ContainerHandle(
             kind=RuntimeKind.DOCKER_RUN,
             container_name=docker_spec.container_name,
             backend_address=backend_address,
+            gateway_address=gateway_address,
         )
+
+    def run_fallback_stop(self) -> bool:
+        """Run [fallback].stop_command in the repo, if this plugin launches
+        via [fallback] and declares one. Returns whether it ran. Repo stop
+        scripts also tear down sidecars dgx-hub doesn't know about (memory
+        watchdogs, shm segments), which a bare `docker stop` would leak.
+        """
+        spec = self.manifest.fallback
+        if not spec.enabled or not spec.stop_command or not self.repo_dir.exists():
+            return False
+        logger.info(
+            "%s: stopping via fallback: %s", self.metadata.name, shlex.join(spec.stop_command)
+        )
+        result = self._run(list(spec.stop_command), None, cwd=self.repo_dir)
+        if result.returncode != 0:
+            raise self._fail("fallback stop", result)
+        return True
 
     def _fallback_port_override_var(self) -> str | None:
         """The env var (if any) a [fallback]-launched script reads to know

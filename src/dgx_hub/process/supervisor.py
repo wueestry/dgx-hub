@@ -74,6 +74,7 @@ class ModelSupervisor:
 
     def _run(self) -> None:
         logger.info("%s: supervisor starting (provision -> start -> health-poll)", self.name)
+        self.ctx.on_output = self._on_output
         try:
             self._update(
                 state=ModelState.PROVISIONING,
@@ -105,6 +106,11 @@ class ModelSupervisor:
             self._update(state=ModelState.FAILED, error=str(exc))
         finally:
             auto_sync.try_reconcile_quietly()
+
+    def _on_output(self, line: str) -> None:
+        """Surface the latest line of provision/start script output as the
+        dashboard's detail text while those (possibly very long) steps run."""
+        self._update(message=line[:200])
 
     def _wait_for_container_running(self, handle: ContainerHandle, timeout: float = 60.0) -> None:
         deadline = time.monotonic() + timeout

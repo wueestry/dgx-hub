@@ -130,3 +130,27 @@ def test_supervisor_fails_when_container_never_starts_running(
     assert status.state.value == "failed"
     assert status.error is not None
     assert "did not reach running state" in status.error
+
+
+def test_supervisor_surfaces_script_output_as_status_message(tmp_path: Path) -> None:
+    class FailingStartPlugin(FakePlugin):
+        def start(self, ctx: RunContext) -> ContainerHandle:
+            assert ctx.on_output is not None
+            ctx.on_output("=== Step 2: Memory budget ===")
+            raise RuntimeError("start failed")
+
+    supervisor = ModelSupervisor("fake", FailingStartPlugin(), make_ctx(tmp_path))
+    seen: list[str] = []
+    original_update = supervisor._update
+
+    def recording_update(**kwargs):
+        if "message" in kwargs:
+            seen.append(kwargs["message"])
+        original_update(**kwargs)
+
+    supervisor._update = recording_update  # type: ignore[method-assign]
+    supervisor.start()
+    _wait_until_terminal(supervisor)
+
+    assert "=== Step 2: Memory budget ===" in seen
+    assert supervisor.status.error == "start failed"

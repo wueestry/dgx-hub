@@ -10,7 +10,6 @@ straight out of `docker run`.
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -18,6 +17,7 @@ from dgx_hub import docker_adapter
 from dgx_hub.plugins.base import RunContext
 from dgx_hub.plugins.manifest import PluginManifest
 from dgx_hub.plugins.manifest_plugin import ManifestPlugin, ManifestPluginError
+from dgx_hub.process.stream import StreamResult
 
 
 def _docker_run_manifest_dict() -> dict:
@@ -65,9 +65,9 @@ def test_removes_stale_exited_container_before_starting(
 
     def fake_run(argv, **kwargs):
         run_calls.append(argv)
-        return MagicMock(returncode=0, stdout="deadbeef", stderr="")
+        return StreamResult(returncode=0, tail=["deadbeef"])
 
-    monkeypatch.setattr("dgx_hub.plugins.manifest_plugin.subprocess.run", fake_run)
+    monkeypatch.setattr("dgx_hub.plugins.manifest_plugin.run_streaming", fake_run)
     monkeypatch.setattr("dgx_hub.docker_adapter.ensure_network", lambda *a, **k: None)
 
     handle = plugin.start(make_ctx(tmp_path))
@@ -98,7 +98,7 @@ def test_running_container_with_same_name_raises_instead_of_removing(
     def fail_run(*args, **kwargs):
         raise AssertionError("docker run should not be invoked when a name conflict exists")
 
-    monkeypatch.setattr("dgx_hub.plugins.manifest_plugin.subprocess.run", fail_run)
+    monkeypatch.setattr("dgx_hub.plugins.manifest_plugin.run_streaming", fail_run)
 
     with pytest.raises(ManifestPluginError, match="already running"):
         plugin.start(make_ctx(tmp_path))
@@ -124,8 +124,8 @@ def test_no_existing_container_skips_removal(
     )
     monkeypatch.setattr("dgx_hub.docker_adapter.ensure_network", lambda *a, **k: None)
     monkeypatch.setattr(
-        "dgx_hub.plugins.manifest_plugin.subprocess.run",
-        lambda argv, **kwargs: MagicMock(returncode=0, stdout="deadbeef", stderr=""),
+        "dgx_hub.plugins.manifest_plugin.run_streaming",
+        lambda argv, **kwargs: StreamResult(returncode=0, tail=["deadbeef"]),
     )
 
     plugin.start(make_ctx(tmp_path))

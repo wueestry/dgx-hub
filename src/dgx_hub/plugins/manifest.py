@@ -193,6 +193,9 @@ class ResourcesSpec(BaseModel):
     min_free_disk_gib: float = 0.0
     min_free_memory_gib: float = 0.0
     gpu_required: bool = True
+    exclusive_gpu: bool = False
+    """Refuse to share the GPU with any other running dgx-hub model, even if
+    memory would fit (e.g. launch scripts that require an idle GPU)."""
 
 
 class EnvVarSpec(BaseModel):

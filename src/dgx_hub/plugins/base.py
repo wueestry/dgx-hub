@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -86,6 +87,7 @@ class ResourceRequirements:
     min_free_disk_gib: float = 0.0
     min_free_memory_gib: float = 0.0
     gpu_required: bool = False
+    exclusive_gpu: bool = False
 
 
 @dataclass(frozen=True)
@@ -124,6 +126,9 @@ class RunContext:
     variant_id: str | None
     env_values: dict[str, str] = field(default_factory=dict)
     allocated_port: int = 0
+    on_output: Callable[[str], None] | None = None
+    """Called with each line of subprocess output (provision/start scripts)
+    as it arrives -- how the supervisor surfaces live progress."""
 
 
 @dataclass

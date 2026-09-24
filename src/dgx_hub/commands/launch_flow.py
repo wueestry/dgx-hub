@@ -2,19 +2,26 @@
 
 from __future__ import annotations
 
+import logging
+import sys
+import time
 from datetime import UTC, datetime
 
 import httpx
 import typer
 from rich.console import Console
 
+from dgx_hub.config import repos_dir
 from dgx_hub.launch.docker_run import merge_variant
-from dgx_hub.logging_config import get_logger, log_file_path
+from dgx_hub.logging_config import console_logging, get_logger, log_file_path
 from dgx_hub.plugins.base import RunContext
-from dgx_hub.plugins.loader import discover_plugins
+from dgx_hub.plugins.loader import LoadedPlugin, discover_plugins
 from dgx_hub.plugins.manifest import PluginManifest
 from dgx_hub.process import ports as port_registry
+from dgx_hub.process import preflight
 from dgx_hub.process import state as state_store
+from dgx_hub.process.lifecycle import StopError, stop_model
+from dgx_hub.process.preflight import ACTIVE_STATES
 from dgx_hub.process.state import ModelRunRecord
 from dgx_hub.process.supervisor import ModelSupervisor
 from dgx_hub.ui.dashboard import run_dashboard
@@ -22,9 +29,9 @@ from dgx_hub.ui.dashboard import run_dashboard
 console = Console()
 logger = get_logger(__name__)
 
-# States a currently-claimed port/container_name should still be treated as
-# "in use" for — i.e. everything except a definitively finished run.
-ACTIVE_STATES = {"provisioning", "starting", "warming_up", "serving"}
+# How long to wait for freed memory to show up in MemAvailable after
+# stopping blockers (unified-memory pages are released asynchronously).
+_MEMORY_SETTLE_SECONDS = 30.0
 
 
 def conflict_check(manifest: PluginManifest, running: dict[str, ModelRunRecord]) -> str | None:
@@ -53,25 +60,54 @@ def launch_and_wait(
     names: list[str],
     variant_by_name: dict[str, str | None],
     env_overrides_by_name: dict[str, dict[str, str]],
+    *,
+    replace: bool = False,
+    force: bool = False,
+    log_level: int | None = logging.INFO,
 ) -> None:
     """Resolve + start every named plugin concurrently, show the live
     dashboard until each reaches a terminal state, then persist and report
     final status. Exits the process (via typer.Exit) on any pre-launch
-    resolution error (unknown plugin, container-name conflict).
+    resolution error (unknown plugin, container-name conflict, resource
+    preflight refused).
+
+    `replace` stops conflicting running models without asking; `force`
+    skips the resource preflight entirely. `log_level` is what gets
+    mirrored to the terminal (None = dashboard only; the log file always
+    gets everything).
     """
+    if log_level is None:
+        _launch_and_wait(names, variant_by_name, env_overrides_by_name, replace, force)
+        return
+    with console_logging(console, log_level):
+        _launch_and_wait(names, variant_by_name, env_overrides_by_name, replace, force)
+
+
+def _launch_and_wait(
+    names: list[str],
+    variant_by_name: dict[str, str | None],
+    env_overrides_by_name: dict[str, dict[str, str]],
+    replace: bool,
+    force: bool,
+) -> None:
     result = discover_plugins()
     running = state_store.load_all()
+
+    unknown = [name for name in names if name not in result.plugins]
+    if unknown:
+        console.print(f"[red]No such plugin:[/red] {unknown[0]!r}. Try `dgx-hub list`.")
+        raise typer.Exit(code=1)
+
+    if not force:
+        _run_preflight(names, result.plugins, running, replace)
+        running = state_store.load_all()
+
     claimed_ports = {rec.port for rec in running.values() if rec.state in ACTIVE_STATES}
 
     supervisors: dict[str, ModelSupervisor] = {}
 
     for name in names:
-        loaded = result.plugins.get(name)
-        if loaded is None:
-            console.print(f"[red]No such plugin:[/red] {name!r}. Try `dgx-hub list`.")
-            raise typer.Exit(code=1)
-
-        plugin = loaded.plugin
+        plugin = result.plugins[name].plugin
         manifest = plugin.manifest
 
         conflict = conflict_check(manifest, running)
@@ -114,7 +150,9 @@ def launch_and_wait(
         record = ModelRunRecord(
             name=name,
             variant_id=variant_id,
-            container_name=None,
+            # Recorded up front so a failed or interrupted start can still be
+            # found (and stopped) by `dgx-hub stop`.
+            container_name=effective.container_name,
             backend_address="",
             port=allocated_port,
             state="provisioning",
@@ -131,7 +169,7 @@ def launch_and_wait(
     for supervisor in supervisors.values():
         supervisor.start()
 
-    run_dashboard(supervisors)
+    run_dashboard(supervisors, console=console)
 
     for name, supervisor in supervisors.items():
         status = supervisor.status
@@ -157,6 +195,82 @@ def launch_and_wait(
             console.print(f"[green]{name}[/green]: serving at {record.backend_address}")
         else:
             console.print(f"[red]{name}[/red]: {status.error or status.state.value}")
+
+
+def _run_preflight(
+    names: list[str],
+    plugins: dict[str, LoadedPlugin],
+    running: dict[str, ModelRunRecord],
+    replace: bool,
+) -> None:
+    """Refuse (or, with consent, make room for) a launch that won't fit next
+    to the models already running. Exits via typer.Exit when it can't proceed.
+    """
+    starting = set(names)
+    for name in names:
+        plugin = plugins[name].plugin
+        resources = plugin.metadata.resources
+        disk_path = repos_dir()
+        check = preflight.check(resources, running, starting, disk_path)
+
+        if not check.disk_ok:
+            console.print(
+                f"[yellow]{name}: only {check.disk_free_gib:.0f} GiB disk free "
+                f"(manifest asks for {check.disk_required_gib:.0f} GiB, including any "
+                "first-run download)[/yellow]"
+            )
+        if check.ok:
+            continue
+
+        if not check.blockers:
+            console.print(
+                f"[red]{name}: not enough free memory: {check.describe()}.[/red] "
+                "Nothing managed by dgx-hub is running; check `docker ps` / "
+                "`ps -eo rss,cmd --sort=-rss | head`, or pass --force to try anyway."
+            )
+            raise typer.Exit(code=1)
+
+        blocker_names = ", ".join(r.name for r in check.blockers)
+        console.print(
+            f"[yellow]{name}: {check.describe()}. Running models in the way: "
+            f"{blocker_names}[/yellow]"
+        )
+        if not replace:
+            if not sys.stdin.isatty():
+                console.print(
+                    "[red]Refusing to start.[/red] Stop them first, or pass --replace "
+                    "(or --force to skip this check)."
+                )
+                raise typer.Exit(code=1)
+            if not typer.confirm(f"Stop {blocker_names} first?", default=False):
+                raise typer.Exit(code=1)
+
+        for record in check.blockers:
+            loaded = plugins.get(record.name)
+            console.print(f"[bold]{record.name}[/bold]: stopping...")
+            try:
+                stop_model(record, loaded.plugin if loaded else None)
+            except StopError as exc:
+                console.print(f"[red]{exc}[/red]")
+                raise typer.Exit(code=1) from exc
+
+        _wait_for_memory(name, resources.min_free_memory_gib)
+
+
+def _wait_for_memory(name: str, required_gib: float) -> None:
+    deadline = time.monotonic() + _MEMORY_SETTLE_SECONDS
+    while True:
+        available = preflight.mem_available_gib()
+        if available is None or available >= required_gib:
+            return
+        if time.monotonic() >= deadline:
+            console.print(
+                f"[red]{name}: still only {available:.0f} GiB memory available after "
+                f"stopping (needs {required_gib:.0f} GiB).[/red] Something outside "
+                "dgx-hub is holding memory, or pass --force to try anyway."
+            )
+            raise typer.Exit(code=1)
+        time.sleep(1.0)
 
 
 def _discover_served_model_ids(backend_address: str, fallback: str) -> list[str]:

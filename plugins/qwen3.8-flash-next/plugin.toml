@@ -1,283 +1,267 @@
 [plugin]
 name = "qwen3.8-flash-next"
-display_name = "Qwen3.8-Flash-Next (vLLM, PLE mmap, DGX Spark)"
-description = "vLLM server for Qwen3.8-Flash-Next (~176B params, 6B active, NVFP4) on one DGX Spark: the 48 GiB n-gram PLE table is served from NVMe via mmap so weights (~75 GiB) fit next to a usable KV cache in the 128 GB unified pool, plus prefix-caching, determinism and MTP speculative-decoding fixes for GB10"
-docs_url = "https://github.com/blazux/qwen3.8-Flash-DGX"
+display_name = "Qwen3.8-Flash-Next (vLLM, PLE mmap, single DGX Spark)"
+description = "vLLM server for Qwen3.8-Flash-Next NVFP4 (Mia-AiLab checkpoint) on one DGX Spark: the ~27 GiB n-gram PLE table is CPU-offloaded from a memory-mapped packed file so weights (~72 GiB on GPU) fit next to a usable KV cache in the 128 GB unified pool, plus MTP speculative decoding and a memory watchdog"
+docs_url = "https://github.com/MiaAI-Lab/Qwen3.8-Flash-Next-Single-DGX-Spark"
 schema_version = 1
 
 [source]
-repo_url = "https://github.com/blazux/qwen3.8-Flash-DGX.git"
+repo_url = "https://github.com/MiaAI-Lab/Qwen3.8-Flash-Next-Single-DGX-Spark.git"
 
-# `./flash setup <profile>` is this repo's own idempotent multi-step provisioner:
-# it builds the image the profile expects (Dockerfile for base=preview,
-# Dockerfile.v0.29 for base=v0.29) with `docker build -t <tag> .`, downloads the
-# ~124 GiB checkpoint into the local HF cache (resumable), and — for MODE=hybrid /
-# hybrid-mtp (the default profile) — runs the one-time fp8-side-layer conversion
-# (and, for hybrid-mtp, the NVFP4 MTP-drafter graft). Each of the four steps checks
-# its own state first and is skipped when already done, so this is exactly the
-# "docker build" provisioning step the schema expects, just wrapped in the repo's
-# own idempotent tooling because a bare `docker build` alone would leave no
-# checkpoint to serve. Image tag for the default (preview-base) profile:
-# "qwen38-flash-dgx" — referenced as [docker].image below.
 [provision]
-command = ["./flash", "setup", "default"]
+# `.env` is required by `./start.sh` (`[[ -f .env ]] || err ...`) but is
+# never created for you -- the README's own setup workflow is `cp
+# .env.sample .env` before the first run. Only copied when absent so a re-run
+# after the user has hand-edited `.env` doesn't stomp it.
+# `./download.sh` fetches the ~99 GiB checkpoint into the local HF cache
+# (resumable, sha256-verified); it already skips re-fetching what's present,
+# which is what makes this step idempotent.
+# download.sh uses the host's python3 if it can import huggingface_hub, else
+# falls back to `docker run -u $(id -u):$(id -g) -v $HF_HOME:/hf`. Under
+# rootless Docker that uid maps to a subordinate host uid which can't write
+# the user-owned cache (PermissionError: '/hf/hub'), so when uv is available
+# run it inside an ephemeral env that puts a huggingface_hub-capable python3
+# first on PATH, forcing the host-side download path.
+command = ["bash", "-c", "[[ -f .env ]] || cp .env.sample .env; if command -v uv >/dev/null; then exec uv run --no-project --with huggingface_hub ./download.sh; else exec ./download.sh; fi"]
 idempotent = true
-estimated_duration = "~1 min if the image/weights/hybrid-checkpoint already exist; ~60-120 min on a first run (124 GiB checkpoint download + ~10 min one-time hybrid-checkpoint conversion, network-dependent)"
+estimated_duration = "~1 min if the checkpoint is already downloaded; 30-90 min on a first run (~99 GiB, network-dependent)"
 
-# No [[patch]] entries: every source patch this repo applies (PLE mmap, GB10 FLA
-# fixes, mamba state-copy guard, prefix-caching fix, exact/deterministic QSA
-# top-k, hybrid fp8 side layers, fp8 KV, det-topk kernel, M%4 padding, reduced
-# MTP draft vocab, ModelOpt block-MoE, tool-marker patches) is baked into the
-# image at `docker build` time by the Dockerfile itself — nothing left for
-# dgx-hub to patch in the cloned repo before launch.
+# Every source patch this repo applies to vLLM itself (PLE mmap offload fixes,
+# ModelOpt MXFP8, QSA fp8 KV, MTP draft-vocab slicing) is applied by
+# `start.sh` at launch time, from files/ it owns. The [[patch]] below fixes
+# start.sh's own patch pipeline instead.
 
-# scripts/serve.sh (what `./flash serve <profile>` calls) is not a static
-# `docker run` invocation: before it runs one, it (1) resolves the actual
-# on-disk HF snapshot directory by reading refs/main out of the cache — a
-# path whose last component is a content hash only known after download, not
-# something a manifest can hardcode; for MODE=hybrid it further points at a
-# sibling "<hash>-fp8hybrid" directory created by the one-time prepare step;
-# (2) when EFFORT_ALIAS=1 (default), rewrites a one-line check in the
-# checkpoint's own chat_template.jinja into a patched copy and bind-mounts
-# that instead, picking the first writable cache directory on the host; and
-# (3) picks the CUDA-graph splitting-op list and validates flag combinations
-# based on the image's own `qwen38.base` label (preview vs v0.29). None of
-# this — dynamic host-path resolution, on-the-fly template rewriting,
-# label-conditional flag selection — is expressible as static [docker]
-# fields (docker_run.py only renders a fixed image/env/volumes/ports/CMD).
-# So actual start/stop goes through [fallback] to the repo's own
-# flash/serve.sh wrapper. [docker] below is kept as an accurate, best-effort
-# static description of the resulting launch (image, mounts, ports, env) for
-# resource estimation and anything that reads the manifest without
-# executing it.
+[[patch]]
+description = "start.sh: always re-extract the vLLM originals from the image"
+file = "start.sh"
+# extract() only copies a module out of the image when files/<x>.orig is
+# missing, so after the image is re-pulled/rebuilt the patch scripts keep
+# patching the *previous* image's sources and bind-mount those over the new
+# image's modules. Re-extracting costs a few `docker create`/`docker cp`
+# calls per launch.
+find = """    if [[ ! -f "$2" ]]; then
+        info "Extracting $(basename "$1") from image..."
+"""
+replace = """    if true; then  # dgx-hub: always re-extract (a cached copy goes stale when the image changes)
+        info "Extracting $(basename "$1") from image..."
+"""
+
+[[patch]]
+description = "start.sh: don't abort on the first launch's empty log archive"
+file = "start.sh"
+# Under `set -euo pipefail`, pruning logs/archive/ with `ls ... | tail |
+# while` exits 2 (ls: no match) when the archive is still empty -- i.e. on
+# every first launch -- killing start.sh silently right after "Step 6".
+find = """ls -1t "$SCRIPT_DIR"/logs/archive/*-container.log 2>/dev/null | tail -n +21 | while read -r f; do"""
+replace = """{ ls -1t "$SCRIPT_DIR"/logs/archive/*-container.log 2>/dev/null || true; } | tail -n +21 | while read -r f; do"""
+
+[[patch]]
+description = "start.sh: keep the crash diagnostics when vLLM printed no exception"
+file = "start.sh"
+# Same pipefail trap: when the container dies without a matching
+# "...Error: ..." line, the REASON=$(... | grep ...) capture fails and
+# `set -e` exits before the "Container exited" / OOM-killed diagnostics.
+find = """| grep -viE "min_frames|max_frames" | tail -1 | cut -c1-400)"""
+replace = """| grep -viE "min_frames|max_frames" | tail -1 | cut -c1-400 || true)"""
+
+[[patch]]
+description = "start.sh: publish via bridge+-p instead of --network host"
+file = "start.sh"
+# On rootless Docker (RootlessKit + slirp4netns -- `docker info` reports
+# "rootless"), `--network host` shares RootlessKit's own private netns, not
+# the real host's: a port vLLM binds there is unreachable from the actual
+# host (confirmed: the container serves fine internally, but both start.sh's
+# own /health curl loop and dgx-hub's health check poll forever, code 000).
+# Every plugin that works on rootless Docker here already uses bridge + -p,
+# which RootlessKit's builtin port-driver does forward correctly. vLLM binds
+# $PORT inside the container either way (--port $PORT below), so this is a
+# same-port passthrough, not a remap. dgx-hub-net (not the anonymous default
+# bridge) so the gateway's own litellm container -- which only joins
+# dgx-hub-net -- can also reach this one by container name; ManifestPlugin
+# computes gateway_address = "<container_name>:<port>" for any [fallback]
+# plugin whose [docker].network_mode isn't "host", which is why this patch
+# and that field have to agree on which network is actually joined.
+find = """    --gpus all --network host --ipc host \\\\
+"""
+replace = """    --gpus all --network dgx-hub-net -p 127.0.0.1:$PORT:$PORT --ipc host \\\\
+"""
+
+# `start.sh` is not a static `docker run` invocation: before it runs one, it
+# (1) resolves the on-disk HF snapshot directory from the local cache -- a
+# path whose last component is a content hash only known after download; (2)
+# builds/reuses a memory-mapped "packed" PLE table file on first boot
+# (files/build_ple_packed_table.py); (3) patches several vLLM/ModelOpt
+# module files under $SCRIPT_DIR/files/ and bind-mounts the patched copies
+# over the image's own paths; and (4) computes the GPU memory budget and
+# container cgroup cap from live `MemTotal`/`MemAvailable` reads. None of
+# this -- dynamic host-path resolution, on-the-fly artifact building,
+# host-metric-conditional flag selection -- is expressible as static
+# [docker] fields (docker_run.py only renders a fixed
+# image/env/volumes/ports/CMD). So actual start/stop goes through
+# [fallback] to the repo's own start.sh/stop.sh. [docker] below is kept as
+# an accurate, best-effort static description of the resulting launch
+# (image, mounts, ports, env) for resource estimation and anything that
+# reads the manifest without executing it.
 [docker]
 mode = "docker-run"
-image = "qwen38-flash-dgx"
-container_name = "qwen38-flash"
+image = "vllm/vllm-openai:qwen38-flash-next"
+container_name = "vllm-fn-tp1"
 network_mode = "bridge"
+# Patched above to bridge + `-p 127.0.0.1:$PORT:$PORT` (rootless-Docker
+# compatible); kept here only as an accurate static description --
+# [fallback] still governs the actual launch.
 gpus = "all"
 ipc = "host"
-shm_size = "16g"
 volumes = []
-# Not expressed above (not repo-relative, so ${REPO_DIR} doesn't apply, and not
-# rendered by dgx-hub anyway while [fallback] governs the actual launch — see
-# above):
-#   - $HF_CACHE (default ~/.cache/huggingface) -> /hf  (the checkpoint; -e
-#     HF_HOME=/hf -e HF_HUB_OFFLINE=1)
-#   - the EFFORT_ALIAS=1 rewritten chat_template.jinja, read-only, at a fixed
-#     in-container path (host location resolved at launch time, see above)
-#   - optional COMPILE_CACHE bind/named-volume mounts for vLLM's and
-#     FlashInfer's compiled-graph caches across boots (unset by default: they
-#     live inside the container and are rebuilt every boot, ~80s)
-env_passthrough = []
-# HF_TOKEN/HUGGING_FACE_HUB_TOKEN are read by scripts/download-weights.sh on
-# the HOST during provisioning (Hub rate-limit avoidance for gated/private
-# checkpoints), never forwarded into the server container itself — it runs
-# fully offline (HF_HUB_OFFLINE=1) against the already-downloaded snapshot.
-ports = [{ container_port = 8000, publish_strategy = "loopback-remap", port_override_env_var = "PORT" }]
-# The real script publishes with `-p ${PORT}:8000` on all host interfaces
-# (not loopback-only) — port_override_env_var wires dgx-hub's allocated port
-# through as PORT when [fallback] invokes `./flash serve`, so this plugin can
-# run concurrently with others despite the script owning its own `-p` flag.
+# Not expressed above (not repo-relative, so ${REPO_DIR} doesn't apply, and
+# not rendered by dgx-hub anyway while [fallback] governs the actual launch):
+#   - $HF_HOME (default ~/.cache/huggingface) -> /root/.cache/huggingface
+#     (the checkpoint; -e HF_HUB_OFFLINE=1 -e TRANSFORMERS_OFFLINE=1)
+#   - ~/.cache/vllm -> /root/.cache/vllm (compiled/packed-table cache across
+#     boots)
+#   - several files/*_patched.py modules, read-only, at fixed in-container
+#     vLLM/ModelOpt package paths (rebuilt from the image's originals on
+#     every `start.sh` run)
+env_passthrough = ["HF_TOKEN"]
+# port_override_env_var wires dgx-hub's allocated port through as PORT when
+# [fallback] invokes `./start.sh` (which both picks the container's internal
+# --port and, per the [[patch]] above, the host `-p` mapping), so this
+# plugin can run concurrently with others. Read regardless of network_mode:
+# ManifestPlugin._fallback_port_override_var() isn't host-mode-specific.
+ports = [{ container_port = 8888, publish_strategy = "loopback-remap", port_override_env_var = "PORT" }]
 command_args = []
 
 [[variant]]
 id = "default"
-label = "Recommended: NVIDIA NVFP4 checkpoint, hybrid fp8 side layers, 500k context (YaRN), MTP=2, deterministic (best on the agentic tournament)"
+label = "Stock Mia NVFP4 checkpoint, native 262144-token context, MTP=3"
 default = true
-# inherits [docker] as-is; `./flash serve default`
-
-[[variant]]
-id = "native"
-label = "Default recipe at the native 262144-token context (no YaRN)"
-
-[[variant]]
-id = "speed"
-label = "Default + MTP=3: +7% decode for about one tournament point"
-
-[[variant]]
-id = "shared"
-label = "Default + smaller prefill chunks, so decoding clients stay responsive while others prefill (issue #9)"
-
-[[variant]]
-id = "context"
-label = "RadixArk checkpoint + NVFP4 MTP draft-experts graft: +22% KV over the RadixArk hybrid checkpoint"
-
-[[variant]]
-id = "context-1m"
-label = "1M-token context via fp8_e4m3 KV cache (x1.9 KV pool, at a speed and some quality cost)"
-
-[[variant]]
-id = "published"
-label = "NVFP4 checkpoint exactly as published, no fp8 side layers (same quality, ~15-25% slower decode)"
-
-[[variant]]
-id = "v0.29"
-label = "Default recipe rebuilt on the vLLM v0.29.0 release image instead of the preview build (Dockerfile.v0.29; measured at parity)"
-docker_overrides = { image = "qwen38-flash-dgx:v0.29" }
-# The other variants above differ from [docker]/[env.*] only in profile env
-# values (MODE/CTX/YARN/MTP/KV_DTYPE/...) applied by scripts/serve.sh, which
-# DockerOverrides has no field for (command_args would become CMD args to the
-# image's fixed vLLM entrypoint, not env vars, and is unused while [fallback]
-# governs the real launch) — they exist here so a variant id maps 1:1 onto
-# this repo's own `profiles/*.env` names for `./flash serve <id>`.
+# inherits [docker] as-is; `./start.sh` reads its profile entirely from
+# `.env` / process environment (see [env.*] below) -- there are no
+# repo-side named profiles to select between, unlike a `./flash serve
+# <profile>` style launcher.
 
 [health]
 url = "http://{backend_address}/health"
-interval_seconds = 5
+interval_seconds = 10
 timeout_seconds = 5
-startup_grace_seconds = 90
-expected_first_boot_seconds = 900
+startup_grace_seconds = 120
+expected_first_boot_seconds = 1800
 
 [resources]
-# README/doctor: ~124 GiB checkpoint + ~13 GiB hybrid side layers + ~3.4 GiB MTP
-# graft (hybrid-mtp only) + image layers; `./flash doctor` requires >=140 GB free
-# for the download alone. Memory: doctor requires >=115 GiB total unified memory
-# ("the recipe needs the Spark's 128 GB pool") with GPU_MEM=0.80 needing that
-# fraction free to boot.
-min_free_disk_gib = 150
-min_free_memory_gib = 110
+# README: ~99 GiB checkpoint (~105 GiB free recommended headroom; ~130 GiB
+# if a second checkpoint copy is being kept during a switch) + image layers
+# + packed-PLE-table build scratch. Memory: the recipe needs the Spark's
+# ~121.69 GiB unified pool, with HOST_RESERVE_GIB=26 (default) capping the
+# GPU-side budget from the host side.
+min_free_disk_gib = 120
+# start.sh refuses to launch unless MemAvailable >= container cgroup cap
+# (100 GiB at the defaults) + 4 GiB.
+min_free_memory_gib = 104
 gpu_required = true
+# start.sh's GPU preflight (REQUIRE_IDLE_GPU=true) refuses any other GPU
+# tenant, so any other running dgx-hub model is a blocker.
+exclusive_gpu = true
 
-[env.MODEL]
+[env.SERVED_MODEL_NAME]
+type = "string"
+default = "qwen3.8-flash-next"
+description = "Model id clients send as `model`"
+
+[env.ABLIT]
 type = "enum"
-choices = ["nvidia/Qwen3.8-Flash-Next-NVFP4", "RadixArk/Qwen3.8-Flash-Next-NVFP4"]
-default = "nvidia/Qwen3.8-Flash-Next-NVFP4"
-description = "HF checkpoint id. RadixArk's copy is needed for MODE=hybrid-mtp (bf16 MTP drafter to graft NVFP4 experts onto)"
+choices = ["0", "1"]
+default = "0"
+description = "0 = stock Mia-AiLab NVFP4 checkpoint; 1 = gated abliterated checkpoint (drowzeys/keys-Qwen3.8-flash-next-ablit-Mia-Single-Spark-only) -- needs HF_TOKEN and accepted HF terms, then `ABLIT=1 ./download.sh` before starting"
 
-[env.MODE]
-type = "enum"
-choices = ["nvfp4", "hybrid", "hybrid-mtp"]
-default = "hybrid"
-description = "nvfp4 = checkpoint as published; hybrid = fp8 side layers (+20% decode, +15-20% KV, needs scripts/prepare-hybrid.sh); hybrid-mtp = hybrid + NVFP4 MTP draft experts (RadixArk checkpoint only, needs scripts/prepare-mtp-graft.sh too)"
-
-[env.CTX]
-type = "integer"
-default = 500000
-description = "Max context length. Native ceiling is 262144 without YaRN; up to ~500000 validated with YARN=1, 1M needs KV_DTYPE=fp8_e4m3"
+[env.TP1_MODEL_ID]
+type = "string"
+default = ""
+description = "Explicit checkpoint override (e.g. nvidia/Qwen3.8-Flash-Next-NVFP4). Its PLE table is a different size than the stock checkpoint's: also raise HOST_RESERVE_GIB (below) to 30, and hand-edit PLE_GIB=47.68 / MTP_WEIGHTS_GIB=2.34 into the cloned repo's own .env -- those two aren't exposed as dgx-hub env vars since only the stock checkpoint is a first-class target here"
 
 [env.YARN]
-type = "boolean"
-default = true
-description = "Enable YaRN rope scaling (factor 4) to serve CTX above the native 262144"
-
-[env.MTP]
-type = "integer"
-default = 2
-description = "Speculative tokens from the model's MTP head (0 disables speculative decoding)"
-
-[env.KV_DTYPE]
 type = "enum"
-choices = ["auto", "fp8_e4m3"]
-default = "auto"
-description = "auto = bf16 KV (recommended). fp8_e4m3 = ~1.9x KV pool / 1M ctx at a speed and quality cost; not available on the v0.29 base"
+choices = ["0", "1"]
+default = "0"
+description = "0 = native rope, context capped at MAX_MODEL_LEN (<=262144). 1 = YaRN scaling, serves YARN_MAX_MODEL_LEN instead"
 
-[env.GPU_MEM]
-type = "string"
-default = "0.80"
-description = "Fraction of the 128 GB unified pool for weights+KV (--gpu-memory-utilization). 0.85 buys ~2 GiB more KV but risks swap after a day; 0.875 OOM-killed on a 300k prefill"
-
-[env.SEQS]
+[env.MAX_MODEL_LEN]
 type = "integer"
-default = 8
-description = "Max concurrent sequences (--max-num-seqs). Leaving this at 1-2 while measuring throughput silently queues requests"
+default = 262144
+description = "Context length when YARN=0. Native ceiling is 262144"
 
-[env.PORT]
+[env.YARN_MAX_MODEL_LEN]
 type = "integer"
-default = 8888
-description = "Host port for the OpenAI-compatible API (container always listens on 8000 internally)"
+default = 524288
+description = "Context length when YARN=1 (ignored otherwise). Ceiling 524288; 1M does not fit"
 
-[env.PREFIX_CACHE]
-type = "boolean"
-default = true
-description = "Enable vLLM prefix caching (--enable-prefix-caching); correct with this image's block_size fix. Repeated prefixes skip the prefill"
+[env.MTP_NUM_SPECULATIVE_TOKENS]
+type = "integer"
+default = 3
+description = "Speculative tokens from the model's MTP head (0 disables speculative decoding, saves ~1.5 GiB)"
 
-[env.DET_TOPK]
-type = "boolean"
-default = true
-description = "Deterministic persistent_topk kernel for the QSA sparse-attention top-k, at no prefill cost. Wins over EXACT_TOPK when both are set"
-
-[env.EXACT_TOPK]
-type = "boolean"
-default = false
-description = "Exact torch.topk fallback for deterministic QSA top-k (also deterministic, but -20-40% long-context prefill vs DET_TOPK)"
-
-[env.PAD_M4]
-type = "boolean"
-default = false
-description = "Hybrid mode only: pad M%4 in the blockwise-fp8 GEMM, ~-40% TTFT at 8k with PREFIX_CACHE=0. A no-op with PREFIX_CACHE=1 (the default) and on the v0.29 base"
-
-[env.DRAFT_VOCAB]
-type = "string"
-default = "1"
-description = "MTP drafter vocabulary: 1 = reduced 65,536-token slice (+20% decode, same tournament score, default), 0 = full vocabulary, or a path to your own ids.npy"
-
-[env.MADVISE]
+[env.KV_CACHE_DTYPE]
 type = "enum"
-choices = ["random", "normal"]
-default = "random"
-description = "madvise() hint for the mmapped PLE table: random = no readahead, cleaner page cache (default); normal = sequential-ish readahead"
+choices = ["fp8", "auto", "bfloat16"]
+default = "fp8"
+description = "fp8 = ~1.85x KV pool, enables long context, small quality/speed cost. auto/bfloat16 = BF16 KV"
 
-[env.FAST_ROWS]
+[env.KV_TARGET_GIB]
 type = "integer"
-default = 0
-description = "PLE gathers of up to this many unique rows run inline on one thread instead of the WORKERS pool; 0 = every gather goes to the pool (higher aggregate decode under concurrency), 512 = old inline path"
+default = 20
+description = "KV pool wish, GiB -- a wish, not a grant: capped at MemTotal - HOST_RESERVE_GIB. start.sh prints \"KV target X reduced to Y\" when the cap binds"
 
-[env.WORKERS]
+[env.HOST_RESERVE_GIB]
 type = "integer"
-default = 32
-description = "Thread-pool size for the mmapped PLE table gather"
+default = 26
+description = "GPU budget cap = MemTotal - this. Protects the host from the GPU-side allocator; raise to 30 for TP1_MODEL_ID=nvidia/Qwen3.8-Flash-Next-NVFP4 (larger GPU-side weights)"
 
-[env.EFFORT_ALIAS]
-type = "boolean"
-default = true
-description = "Accept reasoning_effort high/max (aliased to xhigh) and minimal (aliased to low) on /v1/messages — the checkpoint's chat template otherwise 400s them, including Claude Code's default 'high'"
+[env.MAX_NUM_SEQS]
+type = "integer"
+default = 4
+description = "Concurrent sequences. Raise for short-request throughput; the KV pool holds ~3.8x a full-length request at the default, so higher values trade against long-context concurrency. Pair values above 4 with a higher HOST_RESERVE_GIB (graph-capture memory spike)"
 
-[env.KV_CACHE_MEM]
+[env.MAX_NUM_BATCHED_TOKENS]
+type = "integer"
+default = 2048
+description = "Prefill chunk width. Raising it (e.g. 8192) trades ~3% KV pool for ~11% prefill / ~10% TTFT"
+
+[env.MAMBA_SSM_CACHE_DTYPE]
+type = "enum"
+choices = ["bfloat16", "float32"]
+default = "bfloat16"
+description = "dtype of the GDN recurrent (SSM) state. bfloat16 halves the per-sequence state and mamba page vs. the checkpoint's native float32, at measured +6-8% decode with no accuracy loss"
+
+[env.MTP_DRAFT_VOCAB]
+type = "string"
+default = "files/draft_vocab_en_code_47k.txt"
+description = "Host path (repo-relative) to a reduced MTP draft vocabulary (FR-Spec). Shrinks the draft head and speeds decode; empty restores the full vocabulary. files/draft_vocab_es_en_code_65k.txt is shipped for Spanish-heavy traffic"
+
+[env.CHAT_TEMPLATE]
 type = "string"
 default = ""
-description = "Exact KV cache size in bytes (--kv-cache-memory-bytes), overriding GPU_MEM's fraction-of-total calculation. Empty = let GPU_MEM decide"
+description = "Host path (repo-relative) to a replacement Jinja chat template, bind-mounted read-only. Empty keeps the checkpoint's stock template"
 
-[env.PREWARM]
-type = "boolean"
-default = false
-description = "Stream the full 48 GiB PLE table once at boot to warm the page cache before serving traffic"
+[env.BIND]
+type = "string"
+default = "0.0.0.0"
+description = "Interface the API binds to. 0.0.0.0 (every interface) is this repo's default for an unattended server; set 127.0.0.1 for loopback-only until API_KEY is set"
 
-[env.LOG_REQUESTS]
-type = "boolean"
-default = false
-description = "Log every prompt and output (VLLM_LOGGING_LEVEL=DEBUG, --enable-log-requests --enable-log-outputs) for tools/vllm_watch.py. Debugging only: privacy + unbounded logs"
-
-[env.PROM_MULTIPROC]
-type = "boolean"
-default = false
-description = "Opt-in: aggregate the vllm:ple_mmap_* engine-side counters into /metrics (off by default so it does not change what existing dashboards see)"
-
-[env.COMPILE_CACHE]
+[env.API_KEY]
 type = "string"
 default = ""
-description = "Where to persist vLLM's compiled graphs and FlashInfer's JIT modules across boots. Empty = inside the container (rebuilt every boot, ~80s). A bare name = named docker volumes; an absolute path = bind-mounted dirs"
+description = "Bearer token for the OpenAI API (--api-key). Empty = no auth, and BIND=0.0.0.0 then exposes the model on every interface (start.sh warns at launch)"
 
-[env.EXTRA]
+[env.EXTRA_VLLM_ARGS]
 type = "string"
 default = ""
-description = "Extra vllm serve flags appended verbatim (this repo's own free-form escape hatch)"
+description = "Extra vllm serve flags, word-split with SHELL-WORD semantics (no embedded quotes). This repo's own free-form escape hatch"
 
-[[env.validation]]
-rule = "not (YARN == false and CTX > 262144)"
-message = "CTX above the native 262144 requires YARN=true"
-
-[[env.validation]]
-rule = "not (KV_DTYPE == 'fp8_e4m3' and MODE == 'nvfp4' and CTX <= 262144)"
-message = "KV_DTYPE=fp8_e4m3 is only meaningful for long-context runs; leave it at auto below the native context length"
+[env.EXTRA_DOCKER_ARGS]
+type = "string"
+default = "-e VLLM_USE_V2_MODEL_RUNNER=1"
+description = "Extra docker-run flags, appended verbatim. Default pins the V2 model runner on the MTP draft-model copy (fixes a FULL->PIECEWISE cudagraph_mode downgrade the repo measured without it) -- keep the default unless you know you don't need MTP"
 
 [fallback]
 enabled = true
-# "{variant}" is substituted with the selected --variant id at launch (falls
-# back to "" if none given, though a default variant is always set above) —
-# this is what makes `dgx-hub start qwen3.8-flash-next --variant context-1m`
-# actually run `./flash serve context-1m` instead of always "default".
-start_command = ["./flash", "serve", "{variant}"]
-# `./flash stop` just runs `docker rm -f "$NAME"`; dgx-hub's own generic
-# docker_adapter stop-by-container_name (using [docker].container_name above)
-# covers that equally well, so no stop_command override is declared here.
+start_command = ["./start.sh"]
+stop_command = ["./stop.sh", "-f"]

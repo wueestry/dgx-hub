@@ -5,9 +5,11 @@ from __future__ import annotations
 import typer
 from rich.console import Console
 
-from dgx_hub import docker_adapter
 from dgx_hub.gateway import auto_sync
+from dgx_hub.logging_config import console_logging
+from dgx_hub.plugins.loader import discover_plugins
 from dgx_hub.process import state as state_store
+from dgx_hub.process.lifecycle import StopError, stop_model
 
 console = Console()
 
@@ -30,22 +32,21 @@ def stop_models(
             raise typer.Exit(code=1)
         targets = names
 
-    for name in targets:
-        record = running.get(name)
-        if record is None or record.container_name is None:
-            console.print(f"[yellow]{name}: no state on record, nothing to stop[/yellow]")
-            continue
+    plugins = discover_plugins().plugins
+    with console_logging(console):
+        for name in targets:
+            record = running.get(name)
+            if record is None:
+                console.print(f"[yellow]{name}: no state on record, nothing to stop[/yellow]")
+                continue
 
-        handle = record.to_handle()
-        console.print(f"[bold]{name}[/bold]: stopping (timeout={timeout}s)...")
-        try:
-            docker_adapter.stop(handle, grace_seconds=timeout)
-        except docker_adapter.DockerAdapterError as exc:
-            console.print(f"[red]{name}: stop failed: {exc}[/red]")
-            continue
-
-        record.state = "stopped"
-        state_store.save(record)
-        console.print(f"[green]{name}[/green]: stopped")
+            loaded = plugins.get(name)
+            console.print(f"[bold]{name}[/bold]: stopping (timeout={timeout}s)...")
+            try:
+                stop_model(record, loaded.plugin if loaded else None, timeout=timeout)
+            except StopError as exc:
+                console.print(f"[red]{exc}[/red]")
+                continue
+            console.print(f"[green]{name}[/green]: stopped")
 
     auto_sync.try_reconcile_quietly()

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 import typer
 
 from dgx_hub.commands.launch_flow import launch_and_wait
@@ -15,13 +17,32 @@ def start_models(
     set_env: list[str] = typer.Option(
         [], "--set", help="Override an env var, KEY=VALUE (repeatable)"
     ),
+    replace: bool = typer.Option(
+        False, "--replace", help="Stop running models that are in the way without asking"
+    ),
+    force: bool = typer.Option(
+        False, "--force", help="Skip the free-memory / exclusive-GPU preflight check"
+    ),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Also show debug logs"),
+    quiet: bool = typer.Option(
+        False, "--quiet", "-q", help="Only show the dashboard, no streamed log lines"
+    ),
 ) -> None:
-    """Start one or more models by plugin name, showing a live dashboard
-    until each reaches SERVING (or FAILED)."""
+    """Start one or more models by plugin name, streaming their provision/
+    startup output and showing a live dashboard until each reaches SERVING
+    (or FAILED)."""
     overrides = _parse_overrides(set_env)
     variant_by_name: dict[str, str | None] = dict.fromkeys(names, variant)
     env_overrides_by_name: dict[str, dict[str, str]] = dict.fromkeys(names, overrides)
-    launch_and_wait(names, variant_by_name, env_overrides_by_name)
+    log_level = None if quiet else (logging.DEBUG if verbose else logging.INFO)
+    launch_and_wait(
+        names,
+        variant_by_name,
+        env_overrides_by_name,
+        replace=replace,
+        force=force,
+        log_level=log_level,
+    )
 
 
 def _parse_overrides(pairs: list[str]) -> dict[str, str]:
