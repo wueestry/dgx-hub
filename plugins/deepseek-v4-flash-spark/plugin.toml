@@ -8,21 +8,14 @@ schema_version = 1
 [source]
 repo_url = "https://github.com/MiaAI-Lab/DeepSeek-v4-Flash-One-DGX-Spark.git"
 
-# No [provision] section: `start.sh` auto-downloads the ~107 GB checkpoint
-# into ./hf-hub and coalesces it into ./data/tp1 on first boot.
-
-# No [[patch]] entries: the repo's own image-patch/ files are applied as
-# read-only bind mounts (declared below in [docker].volumes), not patches
-# to files dgx-hub itself manages.
+# No [provision] section: start.sh auto-downloads the ~107 GB checkpoint into
+# ./hf-hub and coalesces it on first boot. No [[patch]] entries: the repo's
+# own image-patch/ files are applied as read-only bind mounts below instead.
 
 [docker]
-# `start.sh` boots via a generated `docker compose` file whose `entrypoint:`
-# chains a boot-time fix (xgrammar upgrade for tool calling) in front of the
-# image's own /opt/recipe/scripts/entrypoint.sh — dgx-hub's docker-run engine
-# has no `--entrypoint` override, so that chain can't be expressed here.
-# [docker] below is kept as an accurate, best-effort static description of
-# the launch (image, mounts, env); actual start/stop goes through [fallback]
-# to the repo's own start.sh/stop.sh until compose/entrypoint support lands.
+# start.sh boots via a generated compose file with an entrypoint chain
+# dgx-hub's docker-run engine can't express, so [fallback] governs the real
+# launch; [docker] here is a best-effort static description.
 mode = "docker-run"
 image = "ghcr.io/0xsero/deepseek-v4-flash-0731-spark-sparkinfer@sha256:2e077489a83a0360952828051fe7f7a32c1801e5ce8436d85f7267583d614ff4"
 container_name = "deepseek-v4-flash-spark"
@@ -43,10 +36,8 @@ volumes = [
   "${REPO_DIR}/image-patch/sparkinfer/attention/_shared/mla/prefill_mg.py:/opt/sparkinfer/sparkinfer/attention/_shared/mla/prefill_mg.py:ro",
 ]
 env_passthrough = ["HF_TOKEN"]
-# network_mode = host: the app binds SERVING_PORT (8888) directly on the host.
-# port_override_env_var wires dgx-hub's allocated port through to the
-# [fallback] launch (start.sh's own SERVING_PORT env var), so this plugin can
-# run concurrently with others despite host networking.
+# network_mode = host: port_override_env_var wires dgx-hub's allocated port
+# through to start.sh's own SERVING_PORT, so this can run concurrently with others.
 ports = [{ container_port = 8888, publish_strategy = "loopback-remap", port_override_env_var = "SERVING_PORT" }]
 command_args = []
 

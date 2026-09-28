@@ -9,22 +9,12 @@ schema_version = 1
 repo_url = "https://github.com/MiaAI-Lab/Ornith-1.5-35B-A3B-DGX-Spark.git"
 
 # No [provision] section: `vllm serve` auto-downloads the NVFP4 checkpoint
-# (~22 GB) into the named HF cache volume below on first container start,
-# same as this repo's own `hf download` pre-step -- just deferred into the
-# container itself. HF_TOKEN is passed through (below) so huggingface_hub
-# authenticates via env var instead of needing a pre-seeded token file
-# (README's "bare hf can hang on HTTP 401" warning is about an *unset* token,
-# not about which mechanism supplies it).
-
+# (~22 GB) on first container start; HF_TOKEN is passed through (below) so
+# huggingface_hub authenticates via env var.
 # No [[patch]] entries: the repo's patches/qwen_triton_warmup.py is applied
-# as a read-only bind mount straight over the image's own module path
-# (declared below in [docker].volumes), not a patch to a file dgx-hub itself
-# manages/diffs.
+# as a read-only bind mount over the image's own module path instead.
 
 [docker]
-# start.sh's `docker run` passes the image name followed directly by the full
-# `vllm serve <model> <flags...>` command with no --entrypoint override, so
-# this launch is fully expressible as command_args (trailing CMD) below.
 mode = "docker-run"
 image = "eugr/spark-vllm-b12x:latest"
 container_name = "ornith-1.5-35b-a3b"
@@ -38,16 +28,11 @@ volumes = [
 ]
 env_passthrough = ["HF_TOKEN"]
 ports = [{ container_port = 8888, publish_strategy = "loopback-remap" }]
-# Mirrors start.sh's vllm invocation exactly, except:
-#  - the model arg is the bare HF repo id (vllm/huggingface_hub resolve +
-#    download it into the cache volume above) instead of start.sh's manually
-#    resolved local snapshot directory -- avoids needing dynamic shell logic
-#    to find the downloaded snapshot hash, which a static manifest can't do.
-#  - --gpu-memory-utilization is pinned at the script's static ceiling (0.85)
-#    rather than the script's dynamic free-memory probe (which launches a
-#    throwaway probe container before the real one) -- not expressible as a
-#    single `docker run`. Override via EXTRA_ARGS below if you hit an
-#    at-boot OOM on a non-idle Spark.
+# Mirrors start.sh's vllm invocation, except the model arg is the bare HF
+# repo id (not start.sh's resolved local snapshot dir) and
+# --gpu-memory-utilization is pinned at the script's static ceiling (0.85)
+# rather than its dynamic free-memory probe -- override via EXTRA_ARGS below
+# if you hit an at-boot OOM on a non-idle Spark.
 command_args = [
   "vllm", "serve", "ornith-ai/Ornith-1.5-35B-A3B-NVFP4",
   "--served-model-name", "ornith-1.5-35b-a3b-nvfp4",

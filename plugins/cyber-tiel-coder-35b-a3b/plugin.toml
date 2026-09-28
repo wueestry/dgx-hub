@@ -6,18 +6,14 @@ docs_url = "https://huggingface.co/peculiar-ragdoll/Cyber-Tiel-Coder-35B-A3B-GGU
 schema_version = 1
 
 # Abliterated (refusal-removed) checkpoint aimed at unguided cybersecurity/CTF
-# and agentic-coding use (model card reports 35% on unguided Cybench, ~70%
-# more SWE-bench-Live solves than unoptimized Ornith-1.5) -- upstream is
-# explicit that deployers own sandboxing/safety for this one, same spirit as
-# the [env.ABLATE] toggle on this repo's deepseek-v4-flash-spark plugin.
+# and agentic-coding use -- upstream is explicit that deployers own
+# sandboxing/safety for this one.
 
 [source]
 repo_url = "https://huggingface.co/peculiar-ragdoll/Cyber-Tiel-Coder-35B-A3B-GGUF-MTP"
 
-# No [provision] section: `-hf` downloads and caches the selected GGUF quant
-# tier into the HF cache volume below on first container start, same as
-# nemotron-3-nano-4b's gguf variant.
-# No [[patch]] entries: fully declarable via [docker] below.
+# No [provision]/[[patch]]: `-hf` downloads and caches the selected GGUF
+# quant tier on first container start, fully declarable via [docker] below.
 
 [docker]
 mode = "docker-run"
@@ -29,10 +25,8 @@ ipc = "host"
 volumes = ["dgx-hub-cyber-tiel-hf-cache:/root/.cache/huggingface"]
 env_passthrough = ["HF_TOKEN"]
 ports = [{ container_port = 8888, publish_strategy = "loopback-remap" }]
-# Model card's recommended launch command, quant tier swapped per [[variant]]
-# below. --spec-type draft-mtp turns on the grafted MTP head; without it the
-# ~0.4 GiB head is just dead weight. Sampling defaults (temp/top-p/top-k) are
-# the model card's own recommended values.
+# Model card's recommended command, quant tier swapped per [[variant]] below.
+# --spec-type draft-mtp turns on the grafted MTP head (dead weight without it).
 command_args = [
   "-hf", "peculiar-ragdoll/Cyber-Tiel-Coder-35B-A3B-GGUF-MTP:Q4_K_XL",
   "--host", "0.0.0.0",
@@ -95,8 +89,7 @@ startup_grace_seconds = 60
 expected_first_boot_seconds = 1800
 
 [resources]
-# Q4_K_XL default weights ~22.7 GiB (Q5_K_XL, the largest offered tier, tops
-# out at ~27 GiB) plus the ~0.4 GiB MTP head and image layers.
+# Q4_K_XL default ~22.7 GiB (Q5_K_XL tops out at ~27 GiB) plus the MTP head and image layers.
 min_free_disk_gib = 40
 min_free_memory_gib = 30
 gpu_required = true
