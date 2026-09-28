@@ -8,9 +8,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from dgx_hub.plugins.loader import DiscoveryResult, LoadedPlugin
 from dgx_hub.plugins.manifest import PluginManifest
 from dgx_hub.plugins.manifest_plugin import ManifestPlugin
+from dgx_hub.ui import picker
 from dgx_hub.ui.picker import pick_models, pick_variant, prompt_env_overrides
 
 
@@ -46,6 +49,45 @@ def test_pick_variant_returns_none_with_single_variant() -> None:
 def test_prompt_env_overrides_empty_when_nothing_required() -> None:
     manifest = _manifest(env={"QUANT": {"default": "nvfp4", "required": False}})
     assert prompt_env_overrides(manifest) == {}
+
+
+def test_prompt_env_overrides_uses_select_for_required_enum(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = _manifest(
+        env={
+            "QUANT": {
+                "type": "enum",
+                "choices": ["nvfp4", "fp8"],
+                "default": "nvfp4",
+                "required": True,
+            }
+        }
+    )
+
+    calls: list[tuple[str, list[str]]] = []
+
+    class FakeAsk:
+        def __init__(self, value: str) -> None:
+            self._value = value
+
+        def ask(self) -> str:
+            return self._value
+
+    def fake_select(message: str, choices: list[str], default: str) -> FakeAsk:
+        calls.append(("select", choices))
+        return FakeAsk(default)
+
+    def fail_text(*args: object, **kwargs: object) -> FakeAsk:
+        raise AssertionError("enum var should prompt via questionary.select, not .text")
+
+    monkeypatch.setattr(picker.questionary, "select", fake_select)
+    monkeypatch.setattr(picker.questionary, "text", fail_text)
+
+    overrides = prompt_env_overrides(manifest)
+
+    assert calls == [("select", ["nvfp4", "fp8"])]
+    assert overrides == {"QUANT": "nvfp4"}
 
 
 def test_discovery_result_smoke(tmp_path: Path) -> None:

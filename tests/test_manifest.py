@@ -8,10 +8,22 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
+from dgx_hub.plugins.env_validation import evaluate_rules
 from dgx_hub.plugins.manifest import PluginManifest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SGLANG_MANIFEST = REPO_ROOT / "plugins" / "qwen3.8-27b-sglang" / "plugin.toml"
+
+
+def test_all_builtin_plugin_manifests_parse() -> None:
+    """Every shipped plugins/*/plugin.toml must satisfy the schema -- catches
+    a broken manifest (this repo's own or one added via the plugin-from-script
+    skill) at test time instead of only when someone runs `dgx-hub list`."""
+    manifest_paths = sorted((REPO_ROOT / "plugins").glob("*/plugin.toml"))
+    assert manifest_paths, "expected at least one built-in plugin manifest"
+    for manifest_path in manifest_paths:
+        raw = tomllib.loads(manifest_path.read_text())
+        PluginManifest.from_toml_dict(raw)
 
 
 def test_sglang_manifest_parses_and_validates() -> None:
@@ -136,3 +148,32 @@ def test_resolve_env_values_serializes_booleans_lowercase() -> None:
     manifest = PluginManifest.from_toml_dict(data)
     assert manifest.resolve_env_values() == {"YARN": "false"}
     assert manifest.resolve_env_values({"YARN": "true"}) == {"YARN": "true"}
+
+
+def test_resolve_env_values_typed_rejects_enum_override_outside_choices() -> None:
+    data = _minimal_docker_run_dict()
+    data["env"] = {"QUANT": {"type": "enum", "choices": ["a", "b"], "default": "a"}}
+    manifest = PluginManifest.from_toml_dict(data)
+    with pytest.raises(ValueError, match="QUANT"):
+        manifest.resolve_env_values_typed({"QUANT": "bogus"})
+
+
+def test_resolve_env_values_typed_rejects_non_integer_override() -> None:
+    data = _minimal_docker_run_dict()
+    data["env"] = {"CONTEXT_LENGTH": {"type": "integer", "default": 1024}}
+    manifest = PluginManifest.from_toml_dict(data)
+    with pytest.raises(ValueError, match="CONTEXT_LENGTH"):
+        manifest.resolve_env_values_typed({"CONTEXT_LENGTH": "not-a-number"})
+
+
+def test_sglang_manifest_env_validation_rule_evaluates() -> None:
+    raw = tomllib.loads(SGLANG_MANIFEST.read_text())
+    manifest = PluginManifest.from_toml_dict(raw)
+
+    violating = manifest.resolve_env_values_typed({"YARN": "true", "CONTEXT_LENGTH": "300000"})
+    assert evaluate_rules(manifest, violating, variant_id="dspark") == [
+        "YaRN is incompatible with DSpark/DFlash2 at context lengths above 262144"
+    ]
+
+    passing = manifest.resolve_env_values_typed({"YARN": "true", "CONTEXT_LENGTH": "300000"})
+    assert evaluate_rules(manifest, passing, variant_id="eagle") == []
