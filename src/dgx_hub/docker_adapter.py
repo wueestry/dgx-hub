@@ -7,6 +7,7 @@ import subprocess
 from collections.abc import Iterator
 from dataclasses import dataclass
 
+from dgx_hub.container_engine import detect_engine
 from dgx_hub.logging_config import get_logger
 from dgx_hub.plugins.base import ContainerHandle, RuntimeKind
 
@@ -29,7 +30,7 @@ class DockerStatus:
 
 
 def _compose_base_argv(handle: ContainerHandle) -> list[str]:
-    argv = ["docker", "compose"]
+    argv = list(detect_engine().compose_prefix)
     if handle.compose_file is not None:
         argv += ["-f", str(handle.compose_file)]
     if handle.compose_project:
@@ -60,7 +61,7 @@ def _inspect_name(handle: ContainerHandle) -> str:
 def stop(handle: ContainerHandle, grace_seconds: int = 30) -> None:
     """Stop the container/service."""
     if handle.kind == RuntimeKind.DOCKER_RUN:
-        argv = ["docker", "stop", "--time", str(grace_seconds), _identity(handle)]
+        argv = [detect_engine().binary, "stop", "--time", str(grace_seconds), _identity(handle)]
     else:
         argv = [
             *_compose_base_argv(handle),
@@ -85,7 +86,7 @@ def remove(handle: ContainerHandle, force: bool = False) -> None:
     unless that leftover container is removed first.
     """
     if handle.kind == RuntimeKind.DOCKER_RUN:
-        argv = ["docker", "rm"]
+        argv = [detect_engine().binary, "rm"]
         if force:
             argv.append("--force")
         argv.append(_identity(handle))
@@ -100,7 +101,7 @@ def remove(handle: ContainerHandle, force: bool = False) -> None:
 
 def _docker_inspect(name: str) -> dict | None:
     result = subprocess.run(
-        ["docker", "inspect", name], capture_output=True, text=True, check=False
+        [detect_engine().binary, "inspect", name], capture_output=True, text=True, check=False
     )
     if result.returncode != 0:
         return None
@@ -150,7 +151,7 @@ def inspect_ports(handle: ContainerHandle) -> dict[int, int]:
 def logs(handle: ContainerHandle, follow: bool = False, tail: int = 200) -> Iterator[str]:
     """Yield log lines, optionally following (`docker logs -f` / `docker compose logs -f`)."""
     if handle.kind == RuntimeKind.DOCKER_RUN:
-        argv = ["docker", "logs", "--tail", str(tail)]
+        argv = [detect_engine().binary, "logs", "--tail", str(tail)]
     else:
         argv = [*_compose_base_argv(handle), "logs", "--tail", str(tail)]
     if follow:
@@ -171,18 +172,29 @@ def logs(handle: ContainerHandle, follow: bool = False, tail: int = 200) -> Iter
             process.terminate()
 
 
+def network_exists(name: str = DEFAULT_GATEWAY_NETWORK) -> bool:
+    """Read-only check for whether the named network already exists."""
+    check = subprocess.run(
+        [detect_engine().binary, "network", "inspect", name],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return check.returncode == 0
+
+
 def ensure_network(name: str = DEFAULT_GATEWAY_NETWORK) -> None:
     """Idempotently create the shared bridge network used by
     `gateway-network` publish-strategy plugins."""
-    check = subprocess.run(
-        ["docker", "network", "inspect", name], capture_output=True, text=True, check=False
-    )
-    if check.returncode == 0:
+    if network_exists(name):
         logger.debug("network %r already exists", name)
         return
     logger.info("creating network %r", name)
     create = subprocess.run(
-        ["docker", "network", "create", name], capture_output=True, text=True, check=False
+        [detect_engine().binary, "network", "create", name],
+        capture_output=True,
+        text=True,
+        check=False,
     )
     if create.returncode != 0:
         logger.error("failed to create network %r: %s", name, create.stderr.strip())

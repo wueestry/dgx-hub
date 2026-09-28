@@ -14,6 +14,7 @@ from rich.console import Console
 from dgx_hub.config import repos_dir
 from dgx_hub.launch.docker_run import merge_variant
 from dgx_hub.logging_config import console_logging, get_logger, log_file_path
+from dgx_hub.plugins import env_validation
 from dgx_hub.plugins.base import RunContext
 from dgx_hub.plugins.loader import LoadedPlugin, discover_plugins
 from dgx_hub.plugins.manifest import PluginManifest
@@ -138,11 +139,28 @@ def _launch_and_wait(
             publish_strategy,
         )
 
+        env_overrides = env_overrides_by_name.get(name, {})
+        try:
+            env_values_typed = manifest.resolve_env_values_typed(env_overrides)
+        except ValueError as exc:
+            console.print(f"[red]{name}: {exc}[/red]")
+            raise typer.Exit(code=1) from exc
+
+        try:
+            violations = env_validation.evaluate_rules(manifest, env_values_typed, variant_id)
+        except ValueError as exc:
+            console.print(f"[red]{name}: {exc}[/red]")
+            raise typer.Exit(code=1) from exc
+        if violations:
+            for message in violations:
+                console.print(f"[red]{name}: {message}[/red]")
+            raise typer.Exit(code=1)
+
         ctx = RunContext(
             repo_dir=plugin.repo_dir,
             state_dir=plugin.repo_dir,
             variant_id=variant_id,
-            env_values=manifest.resolve_env_values(env_overrides_by_name.get(name, {})),
+            env_values=manifest.resolve_env_values(env_overrides),
             allocated_port=allocated_port,
         )
         supervisors[name] = ModelSupervisor(name, plugin, ctx)
@@ -150,8 +168,6 @@ def _launch_and_wait(
         record = ModelRunRecord(
             name=name,
             variant_id=variant_id,
-            # Recorded up front so a failed or interrupted start can still be
-            # found (and stopped) by `dgx-hub stop`.
             container_name=effective.container_name,
             backend_address="",
             port=allocated_port,

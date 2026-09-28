@@ -9,6 +9,7 @@ from collections.abc import Iterator
 import httpx
 
 from dgx_hub import docker_adapter
+from dgx_hub.container_engine import detect_engine
 from dgx_hub.gateway.compose import (
     GatewayPaths,
     ensure_gateway_files,
@@ -33,7 +34,7 @@ def start(
 
     result = subprocess.run(
         [
-            "docker", "compose",
+            *detect_engine().compose_prefix,
             "-f", str(paths.compose_file),
             "-p", "dgx-hub-gateway",
             "--env-file", str(paths.env_file),

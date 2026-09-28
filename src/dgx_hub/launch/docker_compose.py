@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
+from dgx_hub.container_engine import detect_engine
 from dgx_hub.plugins.base import LaunchMode
 from dgx_hub.plugins.manifest import DockerSpec
 
@@ -17,7 +18,7 @@ class BuiltComposeCommand:
 
 
 def _compose_base_argv(docker_spec: DockerSpec) -> list[str]:
-    argv = ["docker", "compose"]
+    argv = list(detect_engine().compose_prefix)
     if docker_spec.compose_file:
         argv += ["-f", docker_spec.compose_file]
     if docker_spec.compose_project:

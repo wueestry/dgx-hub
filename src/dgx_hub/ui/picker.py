@@ -58,9 +58,16 @@ def prompt_env_overrides(manifest: PluginManifest) -> dict[str, str]:
     for name, spec in manifest.env.items():
         if not spec.required:
             continue
-        answer = questionary.text(
-            f"{name} ({spec.description or spec.type}):", default=str(spec.default)
-        ).ask()
+        if spec.type == "enum" and spec.choices:
+            answer = questionary.select(
+                f"{name} ({spec.description or spec.type}):",
+                choices=spec.choices,
+                default=str(spec.default),
+            ).ask()
+        else:
+            answer = questionary.text(
+                f"{name} ({spec.description or spec.type}):", default=str(spec.default)
+            ).ask()
         if answer is not None:
             overrides[name] = answer
     return overrides

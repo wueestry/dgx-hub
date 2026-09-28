@@ -103,8 +103,6 @@ class ManifestPlugin:
 
     def _fail(self, what: str, result: StreamResult) -> ManifestPluginError:
         summary = failure_summary(result.tail)
-        # Every line was already logged as it streamed; only the file needs
-        # the tail again, next to the failure.
         logger.debug(
             "%s: %s failed (exit %d); last output:\n%s",
             self.metadata.name,
@@ -265,10 +263,6 @@ class ManifestPlugin:
 
         docker_spec = self.manifest.docker
         if docker_spec.network_mode != NetworkMode.HOST:
-            # Mirrors _start_via_docker_run: the repo's own launch script is
-            # expected to join dgx-hub-net itself (see the plugin's own
-            # [[patch]]/docs) so the gateway container can reach it by name;
-            # this only has to exist first.
             docker_adapter.ensure_network()
 
         command = [
@@ -297,10 +291,6 @@ class ManifestPlugin:
         if docker_spec.ports:
             port = ctx.allocated_port or docker_spec.ports[0].container_port
             backend_address = f"127.0.0.1:{port}"
-            # Only reachable by name from the gateway's own container if the
-            # repo's script actually joined dgx-hub-net -- true under host
-            # networking regardless (nothing to join), so left empty there
-            # like registry.current_routes() already expects.
             if docker_spec.network_mode != NetworkMode.HOST and docker_spec.container_name:
                 gateway_address = f"{docker_spec.container_name}:{port}"
         return ContainerHandle(

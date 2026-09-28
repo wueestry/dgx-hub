@@ -35,7 +35,6 @@ def _render(supervisors: dict[str, ModelSupervisor]) -> Table:
         style = _STATE_STYLES.get(status.state.value, "")
         state_text = f"[{style}]{status.state.value}[/{style}]" if style else status.state.value
         backend = status.handle.backend_address if status.handle else "-"
-        # One line only: the full error is printed once the dashboard exits.
         detail = (status.error or status.message or "").split("\n", 1)[0]
         table.add_row(name, state_text, backend, detail)
 
@@ -56,7 +55,6 @@ def run_dashboard(
     """
     console = console or Console()
     try:
-        # Non-transient: the last rendered table stays on screen after exit.
         with Live(_render(supervisors), console=console, refresh_per_second=4) as live:
             while True:
                 live.update(_render(supervisors))

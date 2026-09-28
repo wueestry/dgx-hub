@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from dgx_hub.container_engine import detect_engine
 from dgx_hub.plugins.base import LaunchMode, NetworkMode
 from dgx_hub.plugins.manifest import DockerSpec, VariantSpec
 
@@ -74,7 +75,7 @@ def build_argv(
     if not spec.image or not spec.container_name:
         raise ValueError("docker-run mode requires both image and container_name")
 
-    argv: list[str] = ["docker", "run", "--detach", "--name", spec.container_name]
+    argv: list[str] = [detect_engine().binary, "run", "--detach", "--name", spec.container_name]
 
     if spec.network_mode == NetworkMode.HOST:
         argv += ["--network", "host"]

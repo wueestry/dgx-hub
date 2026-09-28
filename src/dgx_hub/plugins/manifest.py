@@ -251,6 +251,31 @@ class FallbackSpec(BaseModel):
     stop_command: list[str] = Field(default_factory=list)
 
 
+def _typed_value(name: str, raw: Any, spec: EnvVarSpec) -> bool | int | str:
+    """Coerce and validate one resolved env value against its declared type
+    and (for enums) choices. Shared by manifest-load-time default validation
+    and runtime `--set`/picker override validation.
+    """
+    if spec.type == "enum":
+        value = str(raw)
+        if spec.choices and value not in spec.choices:
+            raise ValueError(f"{name}: {value!r} is not one of {spec.choices}")
+        return value
+    if spec.type == "boolean":
+        if isinstance(raw, bool):
+            return raw
+        text = str(raw).lower()
+        if text not in ("true", "false"):
+            raise ValueError(f"{name}: {raw!r} is not a valid boolean (use 'true'/'false')")
+        return text == "true"
+    if spec.type == "integer":
+        try:
+            return int(raw)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{name}: {raw!r} is not a valid integer") from exc
+    return str(raw)
+
+
 class PluginManifest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -305,21 +330,31 @@ class PluginManifest(BaseModel):
         data["env_validation"] = validation_raw
         return cls.model_validate(data)
 
+    def resolve_env_values_typed(
+        self, overrides: dict[str, str] | None = None
+    ) -> dict[str, bool | int | str]:
+        """Resolve manifest defaults plus user overrides into typed values,
+        validating each override against its declared type/choices. Raises
+        ValueError naming the offending var on a bad override.
+        """
+        overrides = overrides or {}
+        resolved: dict[str, bool | int | str] = {}
+        for name, spec in self.env.items():
+            raw = overrides.get(name, spec.default)
+            resolved[name] = _typed_value(name, raw, spec)
+        return resolved
+
     def resolve_env_values(self, overrides: dict[str, str] | None = None) -> dict[str, str]:
         """Resolve final string-valued container env vars from manifest
         defaults plus user overrides, serialized consistently regardless of
         declared type — booleans as lowercase 'true'/'false' (the convention
         these repos' own .env files use), not Python's `str(bool)`.
         """
-        overrides = overrides or {}
+        typed = self.resolve_env_values_typed(overrides)
         resolved: dict[str, str] = {}
-        for name, spec in self.env.items():
-            raw = overrides.get(name, spec.default)
-            if spec.type == "boolean":
-                is_true = raw if isinstance(raw, bool) else str(raw).lower() == "true"
-                resolved[name] = "true" if is_true else "false"
-            elif spec.type == "integer":
-                resolved[name] = str(int(raw))
+        for name, value in typed.items():
+            if isinstance(value, bool):
+                resolved[name] = "true" if value else "false"
             else:
-                resolved[name] = str(raw)
+                resolved[name] = str(value)
         return resolved

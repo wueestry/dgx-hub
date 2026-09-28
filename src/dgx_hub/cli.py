@@ -4,7 +4,16 @@ from __future__ import annotations
 
 import typer
 
-from dgx_hub.commands import gateway_cmd, interactive, list_cmd, logs, start, status, stop
+from dgx_hub.commands import (
+    doctor,
+    gateway_cmd,
+    interactive,
+    list_cmd,
+    logs,
+    start,
+    status,
+    stop,
+)
 
 app = typer.Typer(
     name="dgx-hub",
@@ -19,6 +28,7 @@ app.command("start")(start.start_models)
 app.command("stop")(stop.stop_models)
 app.command("status")(status.show_status)
 app.command("logs")(logs.show_logs)
+app.command("doctor")(doctor.run_doctor)
 
 gateway_app = typer.Typer(help="The OpenAI-compatible routing proxy.")
 gateway_app.command("start")(gateway_cmd.gateway_start)
