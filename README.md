@@ -9,6 +9,7 @@ Model servers (SGLang, vLLM, etc.) usually ship as a reference repo with its own
 - **Plugin-based model catalog** — each model is described by a `plugin.toml` manifest (Docker image, ports, env vars, health check, resource requirements), not custom code.
 - **Variants** — a single plugin can expose multiple launch configurations (e.g. different speculative-decoding modes) that override parts of the base Docker spec.
 - **Generic Docker launch engine** — manifests are rendered into `docker run` (or `docker compose`) invocations by the CLI itself; plugins don't shell out to bespoke wrapper scripts unless declared via an explicit fallback.
+- **Container engine auto-detection** — Docker (rootful or rootless) or Podman is detected automatically at startup; `dgx-hub doctor` reports what was found, plus git/GPU/network diagnostics.
 - **Port allocation & conflict detection** — automatically assigns host ports and prevents starting a plugin whose container name is already in use.
 - **Concurrent multi-model start** — each model's provision → start → health-poll lifecycle runs in its own background supervisor thread, rendered as a live `rich` dashboard until every model reaches SERVING (or FAILED).
 - **One public port, route by model** — an optional gateway (Postgres + [LiteLLM proxy](https://github.com/BerriAI/litellm), run as Docker containers) routes `/v1/...` requests to whichever backend is currently serving the request's `"model"`, so multiple models are reachable through one familiar, API-key-gated endpoint instead of one port each. dgx-hub keeps LiteLLM's model list in sync with ground truth (see `dgx-hub gateway sync`); LiteLLM itself handles auth, streaming, and per-key spend tracking.
@@ -45,6 +46,10 @@ dgx-hub start qwen3.8-27b-sglang --variant dspark --set CONTEXT_LENGTH=65536
 # Show status of every model ever started, ground-truthed against Docker
 dgx-hub status
 dgx-hub status --json
+
+# Check the host: which container engine was detected (Docker, Docker
+# rootless, or Podman), git, GPU visibility, and the shared gateway network
+dgx-hub doctor
 
 # Tail or follow a running model's container logs
 dgx-hub logs qwen3.8-27b-sglang --follow
@@ -88,7 +93,7 @@ Plugins live under `plugins/<name>/plugin.toml`. A manifest declares:
 - `[[variant]]` — named overrides layered on top of `[docker]` (e.g. alternate image or extra flags)
 - `[health]` — the HTTP endpoint and timing used to determine when a container is ready
 - `[resources]` — minimum free disk/memory and whether a GPU is required
-- `[env.*]` — typed, validated environment variables exposed to `--set KEY=VALUE`
+- `[env.*]` — typed, validated environment variables exposed to `--set KEY=VALUE`; an `enum` var's `choices` are enforced against both `--set` overrides and the interactive picker, and optional `[[env.validation]]` rules (evaluated with `simpleeval` against the resolved values plus the selected `variant`) can reject inconsistent combinations before launch
 - `[fallback]` (optional, last resort) — an opaque start command for repos whose launch logic (dynamic compose generation, entrypoint chaining, host-side path resolution) can't be expressed declaratively; `{variant}` in the command is substituted with the selected variant id. `[docker]` still supplies the container identity used for the generic stop/status/logs operations afterwards.
 
 A port entry (`[docker].ports`) can declare `port_override_env_var` — the env var the app itself reads to bind a specific port. This is required for `network_mode = "host"` plugins using `publish_strategy = "loopback-remap"` (there's no Docker `-p` mapping under host networking), and is also how `[fallback]`-launched plugins get told which port to bind, regardless of network mode.

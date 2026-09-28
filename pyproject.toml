@@ -16,10 +16,6 @@ dependencies = [
     "tomlkit>=0.13",
     "platformdirs>=4.2",
     "ruamel-yaml>=0.18",
-]
-
-[project.optional-dependencies]
-scaffold = [
     "simpleeval>=1.0",
 ]
 
@@ -50,3 +46,7 @@ ignore = [
 [tool.mypy]
 mypy_path = "src"
 explicit_package_bases = true
+
+[[tool.mypy.overrides]]
+module = "simpleeval"
+ignore_missing_imports = true

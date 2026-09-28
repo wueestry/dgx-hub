@@ -130,13 +130,9 @@ dependencies = [
     { name = "questionary" },
     { name = "rich" },
     { name = "ruamel-yaml" },
+    { name = "simpleeval" },
     { name = "tomlkit" },
     { name = "typer" },
-]
-
-[package.optional-dependencies]
-scaffold = [
-    { name = "simpleeval" },
 ]
 
 [package.dev-dependencies]
@@ -155,11 +151,10 @@ requires-dist = [
     { name = "questionary", specifier = ">=2.0" },
     { name = "rich", specifier = ">=13.7" },
     { name = "ruamel-yaml", specifier = ">=0.18" },
-    { name = "simpleeval", marker = "extra == 'scaffold'", specifier = ">=1.0" },
+    { name = "simpleeval", specifier = ">=1.0" },
     { name = "tomlkit", specifier = ">=0.13" },
     { name = "typer", specifier = ">=0.12" },
 ]
-provides-extras = ["scaffold"]
 
 [package.metadata.requires-dev]
 dev = [
