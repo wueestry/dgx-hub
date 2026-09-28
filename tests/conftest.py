@@ -12,7 +12,7 @@ import dgx_hub.launch.docker_compose as docker_compose
 import dgx_hub.launch.docker_run as docker_run
 from dgx_hub.container_engine import EngineInfo
 
-FAKE_ENGINE = EngineInfo(flavor="docker", binary="docker", version="test")
+FAKE_ENGINE = EngineInfo(kind="docker", rootless=False, binary="docker", version="test")
 
 _ENGINE_CONSUMERS = (docker_adapter, docker_run, docker_compose, gateway_lifecycle)
 

@@ -75,9 +75,12 @@ def build_argv(
     if not spec.image or not spec.container_name:
         raise ValueError("docker-run mode requires both image and container_name")
 
-    argv: list[str] = [detect_engine().binary, "run", "--detach", "--name", spec.container_name]
+    engine = detect_engine()
+    argv: list[str] = [engine.binary, "run", "--detach", "--name", spec.container_name]
 
-    if spec.network_mode == NetworkMode.HOST:
+    use_host_networking = spec.network_mode == NetworkMode.HOST and engine.supports_host_networking
+
+    if use_host_networking:
         argv += ["--network", "host"]
 
     if spec.gpus:
@@ -96,7 +99,7 @@ def build_argv(
     port_override_names = {
         port.port_override_env_var
         for port in spec.ports
-        if spec.network_mode == NetworkMode.HOST and port.port_override_env_var
+        if use_host_networking and port.port_override_env_var
     }
 
     command_args = list(spec.command_args)
@@ -116,7 +119,7 @@ def build_argv(
 
     backend_address = ""
     gateway_address = ""
-    if spec.network_mode == NetworkMode.HOST:
+    if use_host_networking:
         for port in spec.ports:
             if port.publish_strategy == "loopback-remap":
                 if not port.port_override_env_var:
@@ -137,10 +140,13 @@ def build_argv(
                     f"unsupported publish_strategy for network_mode=host: "
                     f"{port.publish_strategy!r}"
                 )
-        # `network_mode = host` has no private bridge network to join (Docker
+        # Real host networking has no private bridge network to join (Docker
         # rejects combining `--network host` with any other `--network`), so
         # these backends are never gateway_address-reachable -- accepted
         # limitation, not something later code should try to work around.
+        # (A rootless engine never reaches this branch: use_host_networking
+        # is False there, so it falls through to the bridge branch below,
+        # which does join dgx-hub-net.)
     else:
         # Always join dgx-hub-net (requires docker_adapter.ensure_network to
         # have been called first) in addition to whatever `-p` publishing the

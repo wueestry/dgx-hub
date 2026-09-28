@@ -1,5 +1,7 @@
-"""Detects which container engine (Docker, Docker rootless, or Podman) to
-drive, so the rest of the codebase never hardcodes the `docker` binary name.
+"""Detects which container engine (Docker or Podman, rootful or rootless) to
+drive, so the rest of the codebase never hardcodes the `docker` binary name
+and networking decisions (e.g. whether `--network host` actually reaches the
+real host) are made once here instead of per-plugin.
 """
 
 from __future__ import annotations
@@ -12,7 +14,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
-EngineFlavor = Literal["docker", "docker-rootless", "podman"]
+EngineKind = Literal["docker", "podman"]
 
 
 class _RunResult(Protocol):
@@ -29,13 +31,31 @@ class ContainerEngineError(RuntimeError):
 
 @dataclass(frozen=True)
 class EngineInfo:
-    flavor: EngineFlavor
+    kind: EngineKind
+    rootless: bool
     binary: str
     version: str
 
     @property
+    def flavor(self) -> str:
+        """Human-readable label, e.g. for `dgx-hub doctor` output."""
+        return f"{self.kind}-rootless" if self.rootless else self.kind
+
+    @property
     def compose_prefix(self) -> list[str]:
         return [self.binary, "compose"]
+
+    @property
+    def supports_host_networking(self) -> bool:
+        """Whether `--network host` actually reaches the real host's network.
+
+        Rootless Docker and rootless Podman both run containers inside a
+        private user-namespaced network (RootlessKit/slirp4netns or pasta),
+        so `--network host` there shares that private namespace, not the
+        real host -- a port bound that way is unreachable from outside the
+        container. Only a rootful engine can deliver genuine host networking.
+        """
+        return not self.rootless
 
 
 def _docker_info(run: _Run) -> dict | None:
@@ -67,20 +87,46 @@ def _podman_version(run: _Run) -> str | None:
     return version or None
 
 
+def _podman_rootless(run: _Run) -> bool | None:
+    """True/False if `podman info` answers clearly; None if it can't be
+    determined (e.g. the format string doesn't resolve on this podman
+    version) -- callers should default to True (rootless) in that case,
+    since treating a rootful engine as rootless only costs an unnecessary
+    bridge+-p publish instead of true host networking, never a break.
+    """
+    result = run(
+        ["podman", "info", "--format", "{{.Host.Security.Rootless}}"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    text = result.stdout.strip().lower()
+    if text in ("true", "false"):
+        return text == "true"
+    return None
+
+
 def _detect_engine(run: _Run, which: Callable[[str], str | None]) -> EngineInfo:
     if which("docker") is not None:
         info = _docker_info(run)
         if info is not None:
             security_options = info.get("SecurityOptions") or []
             is_rootless = any("rootless" in str(opt).lower() for opt in security_options)
-            flavor: EngineFlavor = "docker-rootless" if is_rootless else "docker"
             version = str(info.get("ServerVersion") or "unknown")
-            return EngineInfo(flavor=flavor, binary="docker", version=version)
+            return EngineInfo(kind="docker", rootless=is_rootless, binary="docker", version=version)
 
     if which("podman") is not None:
         podman_version = _podman_version(run)
         if podman_version is not None:
-            return EngineInfo(flavor="podman", binary="podman", version=podman_version)
+            rootless = _podman_rootless(run)
+            return EngineInfo(
+                kind="podman",
+                rootless=True if rootless is None else rootless,
+                binary="podman",
+                version=podman_version,
+            )
 
     raise ContainerEngineError(
         "No working container engine found. Install Docker (rootful or "

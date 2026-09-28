@@ -6,9 +6,13 @@ from pathlib import Path
 
 import pytest
 
+from dgx_hub.container_engine import EngineInfo
+from dgx_hub.launch import docker_run
 from dgx_hub.launch.docker_run import build_argv
 from dgx_hub.plugins.base import LaunchMode, NetworkMode
 from dgx_hub.plugins.manifest import DockerOverrides, DockerSpec, PortSpec, VariantSpec
+
+ROOTLESS_ENGINE = EngineInfo(kind="docker", rootless=True, binary="docker", version="test")
 
 
 def make_spec(**overrides: object) -> DockerSpec:
@@ -103,6 +107,47 @@ def test_host_network_loopback_remap_injects_port_override_env_var() -> None:
     assert "SERVING_PORT=23456" in built.argv
     assert built.backend_address == "127.0.0.1:23456"
     assert built.gateway_address == ""
+
+
+def test_host_network_downgrades_to_bridge_on_rootless_engine(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A plugin only declares intent (network_mode = 'host'); whether that's
+    actually deliverable is decided by the detected engine, not the plugin.
+    A rootless engine can't deliver real host networking, so this should
+    transparently fall back to bridge+-p -- with no port_override_env_var
+    needed, unlike genuine host networking."""
+    monkeypatch.setattr(docker_run, "detect_engine", lambda: ROOTLESS_ENGINE)
+    spec = make_spec(
+        network_mode=NetworkMode.HOST,
+        ports=[PortSpec(container_port=8888, publish_strategy="loopback-remap")],
+    )
+    built = build_argv(spec, None, {}, allocated_port=23456, repo_dir=Path("/tmp"))
+    assert "host" not in built.argv
+    assert "--network" in built.argv
+    assert "dgx-hub-net" in built.argv
+    assert "127.0.0.1:23456:8888" in built.argv
+    assert built.backend_address == "127.0.0.1:23456"
+    assert built.gateway_address == "c1:8888"
+
+
+def test_host_network_stays_real_on_rootful_engine(monkeypatch: pytest.MonkeyPatch) -> None:
+    rootful = EngineInfo(kind="docker", rootless=False, binary="docker", version="test")
+    monkeypatch.setattr(docker_run, "detect_engine", lambda: rootful)
+    spec = make_spec(
+        network_mode=NetworkMode.HOST,
+        ports=[
+            PortSpec(
+                container_port=8888,
+                publish_strategy="loopback-remap",
+                port_override_env_var="SERVING_PORT",
+            )
+        ],
+    )
+    built = build_argv(spec, None, {}, allocated_port=23456, repo_dir=Path("/tmp"))
+    assert "host" in built.argv
+    assert "dgx-hub-net" not in built.argv
+    assert "SERVING_PORT=23456" in built.argv
 
 
 def test_extra_args_are_shlex_split_into_command_not_env() -> None:

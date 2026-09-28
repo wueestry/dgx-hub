@@ -19,7 +19,12 @@ def _engine_check() -> tuple[str, str]:
         engine = detect_engine()
     except ContainerEngineError as exc:
         return "fail", str(exc)
-    return "ok", f"{engine.flavor} {engine.version} (binary: {engine.binary})"
+    networking = (
+        "true host networking"
+        if engine.supports_host_networking
+        else "no real host networking -- 'host' plugins auto-downgrade to bridge+-p"
+    )
+    return "ok", f"{engine.flavor} {engine.version} (binary: {engine.binary}, {networking})"
 
 
 def _git_check() -> tuple[str, str]:
