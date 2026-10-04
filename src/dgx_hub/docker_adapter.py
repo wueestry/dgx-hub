@@ -201,3 +201,16 @@ def ensure_network(name: str = DEFAULT_GATEWAY_NETWORK) -> None:
         raise DockerAdapterError(
             f"failed to create network {name!r}: {create.stderr.strip()}"
         )
+
+
+def image_identity(handle: ContainerHandle) -> str | None:
+    """Immutable image ID used by the actual container, including locally built images."""
+    try:
+        result = subprocess.run(
+            [detect_engine().binary, "inspect", "--format", "{{.Image}}", _inspect_name(handle)],
+            capture_output=True, text=True, timeout=10,
+        )
+        value = result.stdout.strip()
+        return value if result.returncode == 0 and value.startswith("sha256:") else None
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return None

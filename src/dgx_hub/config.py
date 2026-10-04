@@ -11,11 +11,11 @@ APP_NAME = "dgx-hub"
 
 
 def builtin_plugins_dir() -> Path:
-    """The `plugins/` directory shipped alongside the source checkout."""
+    """The built-in manifests shipped as package resources."""
     override = os.environ.get("DGX_HUB_BUILTIN_PLUGINS_DIR")
     if override:
         return Path(override)
-    return Path(__file__).resolve().parent.parent.parent / "plugins"
+    return Path(__file__).resolve().parent / "builtin_plugins"
 
 
 def user_config_dir() -> Path:

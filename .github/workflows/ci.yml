@@ -1,0 +1,22 @@
+name: CI
+on: [push, pull_request]
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.11.18'
+      - run: uv sync --locked --python 3.11
+      - run: uv run ruff check src tests
+      - run: uv run mypy src
+      - run: uv run pytest -q
+      - run: uv build --wheel
+      - name: Installed wheel smoke test outside checkout
+        run: |
+          uv venv /tmp/dgx-wheel
+          uv pip install --python /tmp/dgx-wheel/bin/python dist/*.whl
+          cd /tmp
+          /tmp/dgx-wheel/bin/python -c 'from dgx_hub.plugins.loader import discover_plugins; r = discover_plugins(); assert len(r.plugins) == 10 and not r.broken, r.broken'
+          /tmp/dgx-wheel/bin/dgx-hub list

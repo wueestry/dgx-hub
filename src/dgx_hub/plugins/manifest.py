@@ -22,6 +22,7 @@ class PluginInfo(BaseModel):
 class SourceSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    revision: str | None = None
     repo_url: str
 
 
@@ -206,6 +207,7 @@ class EnvVarSpec(BaseModel):
     description: str = ""
     choices: list[str] | None = None
     required: bool = False
+    secret: bool = False
 
     @model_validator(mode="after")
     def _validate_default_against_type(self) -> EnvVarSpec:
@@ -341,6 +343,8 @@ class PluginManifest(BaseModel):
         resolved: dict[str, bool | int | str] = {}
         for name, spec in self.env.items():
             raw = overrides.get(name, spec.default)
+            if spec.required and not str(raw):
+                raise ValueError(f"{name}: a value is required")
             resolved[name] = _typed_value(name, raw, spec)
         return resolved
 

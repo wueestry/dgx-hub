@@ -28,9 +28,11 @@ def _configure_once() -> None:
     _configured = True
 
     path = log_file_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-    handler = RotatingFileHandler(path, maxBytes=5_000_000, backupCount=3)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handler: logging.Handler = RotatingFileHandler(path, maxBytes=5_000_000, backupCount=3)
+    except OSError:
+        handler = logging.StreamHandler()
     handler.setFormatter(
         logging.Formatter("%(asctime)s %(levelname)-7s %(name)s: %(message)s")
     )
@@ -43,7 +45,6 @@ def _configure_once() -> None:
 
 def get_logger(name: str) -> logging.Logger:
     """A logger under the `dgx_hub` namespace, writing to `log_file_path()`."""
-    _configure_once()
     return logging.getLogger(name)
 
 

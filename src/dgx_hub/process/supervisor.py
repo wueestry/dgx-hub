@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any
@@ -34,7 +35,9 @@ class ModelSupervisor:
         plugin: ModelPlugin,
         ctx: RunContext,
         container_start_timeout: float = 60.0,
+        on_transition: Callable[[SupervisorStatus], None] | None = None,
     ) -> None:
+        self.on_transition = on_transition
         self.name = name
         self.plugin = plugin
         self.ctx = ctx
@@ -51,7 +54,10 @@ class ModelSupervisor:
 
     def _update(self, **kwargs: Any) -> None:
         with self._lock:
-            self._status = replace(self._status, **kwargs)
+            status = replace(self._status, **kwargs)
+            if self.on_transition and ("state" in kwargs or "handle" in kwargs):
+                self.on_transition(status)
+            self._status = status
 
     def is_alive(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
@@ -66,11 +72,16 @@ class ModelSupervisor:
         )
         self._thread.start()
 
+    def join(self, timeout: float | None = None) -> None:
+        if self._thread:
+            self._thread.join(timeout=timeout)
+
     def request_stop(self) -> None:
         """Ask an in-progress health-poll loop to exit early (does not stop
         the container itself — see docker_adapter.stop / commands/stop.py).
         """
         self._stop_event.set()
+        self.ctx.cancel_event.set()
 
     def _run(self) -> None:
         logger.info("%s: supervisor starting (provision -> start -> health-poll)", self.name)
@@ -83,6 +94,8 @@ class ModelSupervisor:
             )
             self.plugin.provision(self.ctx)
 
+            if self._stop_event.is_set():
+                raise RuntimeError("Launch interrupted during provisioning")
             self._update(state=ModelState.STARTING, message="starting container")
             handle = self.plugin.start(self.ctx)
             logger.info(
@@ -96,6 +109,7 @@ class ModelSupervisor:
                 message=f"waiting for {handle.container_name or self.name} to report running",
             )
 
+            self.ctx.image_digest = docker_adapter.image_identity(handle)
             self._wait_for_container_running(handle, timeout=self.container_start_timeout)
 
             self._update(state=ModelState.WARMING_UP, message="")
@@ -116,6 +130,8 @@ class ModelSupervisor:
         deadline = time.monotonic() + timeout
         started = time.monotonic()
         while True:
+            if self._stop_event.is_set():
+                raise RuntimeError("Launch monitoring interrupted; container retained")
             if docker_adapter.status(handle).running:
                 logger.info(
                     "%s: container reached running state after %.1fs",
@@ -139,6 +155,8 @@ class ModelSupervisor:
         started = time.monotonic()
 
         while True:
+            if self._stop_event.is_set():
+                raise RuntimeError("Launch monitoring interrupted; container retained")
             result = self.plugin.health_check(self.ctx, handle)
             elapsed = time.monotonic() - started
             logger.debug(

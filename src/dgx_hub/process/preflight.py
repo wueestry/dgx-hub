@@ -89,6 +89,9 @@ def running_models(records: dict[str, ModelRunRecord], exclude: set[str]) -> lis
     for name, record in records.items():
         if name in exclude or record.state not in ACTIVE_STATES:
             continue
+        if record.state in {"provisioning", "starting"}:
+            result.append(record)
+            continue
         if record.container_name is None:
             continue
         try:

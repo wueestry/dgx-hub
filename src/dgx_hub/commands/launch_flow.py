@@ -6,6 +6,7 @@ import logging
 import sys
 import time
 from datetime import UTC, datetime
+from functools import partial
 
 import httpx
 import typer
@@ -15,7 +16,7 @@ from dgx_hub.config import repos_dir
 from dgx_hub.launch.docker_run import merge_variant
 from dgx_hub.logging_config import console_logging, get_logger, log_file_path
 from dgx_hub.plugins import env_validation
-from dgx_hub.plugins.base import RunContext
+from dgx_hub.plugins.base import ResourceRequirements, RunContext
 from dgx_hub.plugins.loader import LoadedPlugin, discover_plugins
 from dgx_hub.plugins.manifest import PluginManifest
 from dgx_hub.process import ports as port_registry
@@ -24,7 +25,7 @@ from dgx_hub.process import state as state_store
 from dgx_hub.process.lifecycle import StopError, stop_model
 from dgx_hub.process.preflight import ACTIVE_STATES
 from dgx_hub.process.state import ModelRunRecord
-from dgx_hub.process.supervisor import ModelSupervisor
+from dgx_hub.process.supervisor import ModelSupervisor, SupervisorStatus
 from dgx_hub.ui.dashboard import run_dashboard
 
 console = Console()
@@ -91,7 +92,55 @@ def _launch_and_wait(
     replace: bool,
     force: bool,
 ) -> None:
+    with state_store.process_lock("launch"):
+        supervisors, running = _prepare_launch(
+            names, variant_by_name, env_overrides_by_name, replace, force
+        )
+    _wait_launch(supervisors, running)
+
+
+def _prepare_launch(
+    names: list[str],
+    variant_by_name: dict[str, str | None],
+    env_overrides_by_name: dict[str, dict[str, str]],
+    replace: bool,
+    force: bool,
+) -> tuple[dict[str, ModelSupervisor], dict[str, ModelRunRecord]]:
     result = discover_plugins()
+    if not names or len(names) != len(set(names)):
+        console.print("[red]Launch names must be nonempty and unique.[/red]")
+        raise typer.Exit(code=1)
+    # Validate the complete batch before replacement or reservations.
+    containers: set[str | None] = set()
+    fixed_ports: set[int] = set()
+    try:
+        for name in names:
+            manifest = result.plugins[name].plugin.manifest
+            variant = variant_by_name.get(name) or manifest.default_variant_id()
+            spec = manifest.get_variant(variant) if variant else None
+            effective = merge_variant(manifest.docker, spec)
+            from dgx_hub.plugins.manifest import check_host_mode_port_semantics
+
+            if not manifest.fallback.enabled:
+                check_host_mode_port_semantics(effective)
+            values = manifest.resolve_env_values_typed(env_overrides_by_name.get(name, {}))
+            violations = env_validation.evaluate_rules(manifest, values, variant)
+            if violations:
+                raise ValueError("; ".join(violations))
+            if effective.container_name and effective.container_name in containers:
+                raise ValueError(f"Duplicate container name: {effective.container_name}")
+            containers.add(effective.container_name)
+            for port in effective.ports:
+                if port.publish_strategy == "fixed-exclusive":
+                    if port.container_port in fixed_ports:
+                        raise ValueError(f"Duplicate fixed port: {port.container_port}")
+                    fixed_ports.add(port.container_port)
+        resources = [result.plugins[n].plugin.metadata.resources for n in names]
+        if sum(r.gpu_required for r in resources) > 1 and any(r.exclusive_gpu for r in resources):
+            raise ValueError("Batch contains incompatible exclusive GPU requirements")
+    except (KeyError, ValueError) as exc:
+        console.print(f"[red]Invalid launch plan: {exc}[/red]")
+        raise typer.Exit(code=1) from exc
     running = state_store.load_all()
 
     unknown = [name for name in names if name not in result.plugins]
@@ -99,13 +148,15 @@ def _launch_and_wait(
         console.print(f"[red]No such plugin:[/red] {unknown[0]!r}. Try `dgx-hub list`.")
         raise typer.Exit(code=1)
 
-    if not force:
-        _run_preflight(names, result.plugins, running, replace)
-        running = state_store.load_all()
+    for name in names:
+        if name in running and running[name].state in ACTIVE_STATES:
+            console.print(f"[red]{name} already has an active launch; stop it first.[/red]")
+            raise typer.Exit(code=1)
 
     claimed_ports = {rec.port for rec in running.values() if rec.state in ACTIVE_STATES}
 
     supervisors: dict[str, ModelSupervisor] = {}
+    records: list[ModelRunRecord] = []
 
     for name in names:
         plugin = result.plugins[name].plugin
@@ -129,6 +180,9 @@ def _launch_and_wait(
             if publish_strategy == "fixed-exclusive"
             else port_registry.allocate_port(claimed_ports, preferred=preferred_port)
         )
+        if allocated_port and allocated_port in claimed_ports:
+            console.print(f"[red]Port {allocated_port} is already reserved.[/red]")
+            raise typer.Exit(code=1)
         claimed_ports.add(allocated_port)
         logger.info(
             "%s: resolved variant=%r container_name=%r port=%d (%s)",
@@ -163,7 +217,6 @@ def _launch_and_wait(
             env_values=manifest.resolve_env_values(env_overrides),
             allocated_port=allocated_port,
         )
-        supervisors[name] = ModelSupervisor(name, plugin, ctx)
 
         record = ModelRunRecord(
             name=name,
@@ -175,42 +228,71 @@ def _launch_and_wait(
             started_at=datetime.now(UTC).isoformat(),
         )
         running[name] = record
-        state_store.save(record)
+        records.append(record)
+        supervisors[name] = ModelSupervisor(
+            name,
+            plugin,
+            ctx,
+            on_transition=partial(_persist_status, record, ctx=ctx),
+        )
 
+    if not force:
+        _run_preflight(names, result.plugins, state_store.load_all(), replace)
+    state_store.save_many(records)
+    return supervisors, running
+
+
+def _persist_status(record: ModelRunRecord, status: SupervisorStatus, ctx: RunContext) -> None:
+    record.state = status.state.value
+    record.error = status.error
+    record.source_commit = ctx.source_commit
+    record.image_digest = ctx.image_digest
+    if status.handle:
+        handle = status.handle
+        record.container_name = handle.container_name
+        record.backend_address = handle.backend_address
+        record.gateway_address = handle.gateway_address
+        record.kind = handle.kind.value
+        record.compose_project = handle.compose_project
+        record.compose_file = str(handle.compose_file) if handle.compose_file else None
+        record.service_name = handle.service_name
+    if record.state == "serving" and record.backend_address:
+        record.served_model_ids = _discover_served_model_ids(record.backend_address, record.name)
+    state_store.save(record)
+
+
+def _wait_launch(
+    supervisors: dict[str, ModelSupervisor], running: dict[str, ModelRunRecord]
+) -> None:
     console.print(
-        f"Starting {len(supervisors)} model(s)... "
-        f"(detailed startup logs: {log_file_path()})"
+        f"Starting {len(supervisors)} model(s)... (detailed startup logs: {log_file_path()})"
     )
     logger.info("starting %d model(s): %s", len(supervisors), ", ".join(supervisors))
     for supervisor in supervisors.values():
         supervisor.start()
 
-    run_dashboard(supervisors, console=console)
+    try:
+        run_dashboard(supervisors, console=console)
+    except KeyboardInterrupt:
+        for supervisor in supervisors.values():
+            supervisor.request_stop()
+        for supervisor in supervisors.values():
+            supervisor.join(timeout=10)
+        raise typer.Exit(code=130) from None
+
+    for supervisor in supervisors.values():
+        supervisor.join()
 
     for name, supervisor in supervisors.items():
         status = supervisor.status
         record = running[name]
-        record.state = status.state.value
-        if status.handle is not None:
-            handle = status.handle
-            record.container_name = handle.container_name
-            record.backend_address = handle.backend_address
-            record.gateway_address = handle.gateway_address
-            record.kind = handle.kind.value
-            record.compose_project = handle.compose_project
-            record.compose_file = str(handle.compose_file) if handle.compose_file else None
-            record.service_name = handle.service_name
-
-        if status.state.value == "serving" and record.backend_address:
-            record.served_model_ids = _discover_served_model_ids(
-                record.backend_address, fallback=name
-            )
-        state_store.save(record)
-
         if status.state.value == "serving":
             console.print(f"[green]{name}[/green]: serving at {record.backend_address}")
         else:
             console.print(f"[red]{name}[/red]: {status.error or status.state.value}")
+
+    if any(s.status.state.value != "serving" for s in supervisors.values()):
+        raise typer.Exit(code=1)
 
 
 def _run_preflight(
@@ -223,9 +305,14 @@ def _run_preflight(
     to the models already running. Exits via typer.Exit when it can't proceed.
     """
     starting = set(names)
-    for name in names:
-        plugin = plugins[name].plugin
-        resources = plugin.metadata.resources
+    for name in [", ".join(names)]:
+        requested = [plugins[n].plugin.metadata.resources for n in names]
+        resources = ResourceRequirements(
+            min_free_memory_gib=sum(r.min_free_memory_gib for r in requested),
+            min_free_disk_gib=sum(r.min_free_disk_gib for r in requested),
+            gpu_required=any(r.gpu_required for r in requested),
+            exclusive_gpu=any(r.exclusive_gpu for r in requested),
+        )
         disk_path = repos_dir()
         check = preflight.check(resources, running, starting, disk_path)
 

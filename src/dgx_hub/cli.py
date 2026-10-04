@@ -52,6 +52,9 @@ app.add_typer(gateway_app, name="gateway")
 
 @app.callback(invoke_without_command=True)
 def main(ctx: typer.Context) -> None:
+    from dgx_hub.logging_config import _configure_once
+
+    _configure_once()
     if ctx.invoked_subcommand is None:
         interactive.run_interactive()
 

@@ -66,3 +66,32 @@ def test_save_and_load_round_trip() -> None:
     state_store.save(record)
     loaded = state_store.load_all()
     assert loaded["x"] == record
+
+
+def test_corrupt_state_is_preserved(tmp_path: Path) -> None:
+    path = tmp_path / "state.json"
+    path.write_text("{bad json")
+    with pytest.raises(state_store.StateError, match="preserved"):
+        state_store.load_all()
+    assert path.read_text() == "{bad json"
+
+
+def _save_in_process(path: str, name: str) -> None:
+    state_store.state_file = lambda: Path(path)
+    state_store.save(ModelRunRecord(name, None, name, "", 8888, "starting", ""))
+
+
+def test_concurrent_process_updates(tmp_path: Path) -> None:
+    import multiprocessing
+
+    context = multiprocessing.get_context("fork")
+    workers = [
+        context.Process(target=_save_in_process, args=(str(tmp_path / "state.json"), str(i)))
+        for i in range(12)
+    ]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(timeout=5)
+        assert worker.exitcode == 0
+    assert len(state_store.load_all()) == 12

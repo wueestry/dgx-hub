@@ -53,3 +53,26 @@ def test_failure_summary_falls_back_to_last_lines() -> None:
         "no error message in the output; it ended with:\nb\nc"
     )
     assert failure_summary([]) == "(no output)"
+
+
+def test_timeout_terminates_silent_process() -> None:
+    import sys
+    import time
+
+    started = time.monotonic()
+    result = run_streaming(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        logger=logger,
+        prefix="x",
+        timeout=0.1,
+    )
+    assert result.returncode != 0
+    assert "timed out" in result.output
+    assert time.monotonic() - started < 5
+
+
+def test_redacts_output_and_tail() -> None:
+    result = run_streaming(
+        ["echo", "credential"], logger=logger, prefix="x", secrets=["credential"]
+    )
+    assert result.output == "<redacted>"

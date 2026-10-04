@@ -1,7 +1,7 @@
 [project]
 name = "dgx-hub"
 version = "0.1.0"
-description = "Add your description here"
+description = "Declarative model server orchestration and gateway management for NVIDIA DGX Spark"
 readme = "README.md"
 authors = [
     { name = "Ryan Wüest", email = "wueestry@protonmail.com" }

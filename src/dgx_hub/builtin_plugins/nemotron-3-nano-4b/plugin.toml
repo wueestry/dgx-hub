@@ -1,0 +1,98 @@
+[plugin]
+name = "nemotron-3-nano-4b"
+display_name = "Nemotron 3 Nano 4B"
+description = "NVIDIA's Nemotron 3 Nano 4B, a hybrid Mamba-2/Transformer edge model (4 attention layers of 42 total) purpose-built for Jetson/RTX/DGX Spark. vLLM BF16/FP8 variants for that class of hardware, plus a llama.cpp Q4_K_M GGUF variant (~2.8 GiB) that also fits on small consumer GPUs"
+docs_url = "https://huggingface.co/blog/nvidia/nemotron-3-nano-4b"
+schema_version = 1
+
+[source]
+repo_url = "https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16"
+
+# No [provision]/[[patch]]/[fallback]: a bare `vllm serve` command with no
+# wrapper script, fully expressible via [docker] below.
+
+[docker]
+mode = "docker-run"
+# NVIDIA's model card calls out this NGC image for Jetson Thor / DGX Spark
+# (aarch64); the public vllm/vllm-openai Docker Hub image is x86_64-only.
+image = "nvcr.io/nvidia/vllm:26.02-py3"
+container_name = "nemotron-3-nano-4b"
+network_mode = "bridge"
+gpus = "all"
+# No separate shm_size: ipc = "host" already covers it, and podman rejects
+# --shm-size together with --ipc host (Docker just silently ignores it).
+ipc = "host"
+volumes = ["dgx-hub-nemotron3-nano-hf-cache:/root/.cache/huggingface"]
+env_passthrough = ["HF_TOKEN"]
+ports = [{ container_port = 8888, publish_strategy = "loopback-remap" }]
+# --mamba_ssm_cache_dtype float32 is required for this hybrid architecture's
+# Mamba-2 layers. The upstream command also recommends a nano_v3 reasoning
+# parser, but that plugin .py isn't baked into this image -- add it via
+# EXTRA_ARGS below if your image bundles or mounts it.
+command_args = [
+  "vllm", "serve", "nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16",
+  "--served-model-name", "nemotron-3-nano-4b",
+  "--host", "0.0.0.0",
+  "--port", "8888",
+  "--trust-remote-code",
+  "--tensor-parallel-size", "1",
+  "--max-num-seqs", "8",
+  "--max-model-len", "262144",
+  "--mamba_ssm_cache_dtype", "float32",
+]
+
+[[variant]]
+id = "bf16"
+label = "BF16 (default, broadest compatibility)"
+default = true
+# inherits [docker] as-is
+
+[[variant]]
+id = "fp8"
+label = "FP8 (NVIDIA's recommended production quant for DGX Spark/Jetson Thor, ~1.8x latency/throughput vs BF16)"
+docker_overrides = { command_args = [
+  "vllm", "serve", "nvidia/NVIDIA-Nemotron-3-Nano-4B-FP8",
+  "--served-model-name", "nemotron-3-nano-4b-fp8",
+  "--host", "0.0.0.0",
+  "--port", "8888",
+  "--trust-remote-code",
+  "--tensor-parallel-size", "1",
+  "--max-num-seqs", "8",
+  "--max-model-len", "262144",
+  "--mamba_ssm_cache_dtype", "float32",
+  "--kv-cache-dtype", "fp8",
+] }
+
+[[variant]]
+id = "gguf"
+label = "GGUF Q4_K_M via llama.cpp (~2.8 GiB, fits small consumer GPUs; no tool-calling/reasoning-trace parsing)"
+docker_overrides = { image = "ghcr.io/ggml-org/llama.cpp:server-cuda", command_args = [
+  "-hf", "nvidia/NVIDIA-Nemotron-3-Nano-4B-GGUF:Q4_K_M",
+  "--host", "0.0.0.0",
+  "--port", "8888",
+  "--alias", "nemotron-3-nano-4b-gguf",
+  "-ngl", "999",
+  "-c", "8192",
+] }
+# Floating `server-cuda` tag used deliberately: NemotronH support landed in
+# llama.cpp fairly recently (ggml-org/llama.cpp#18058), and an older pinned
+# build may predate it. -c 8192 leaves VRAM headroom on small GPUs; raise via
+# EXTRA_ARGS if your card has room (NVIDIA's example uses -c 0, the full context).
+
+[health]
+url = "http://{backend_address}/health"
+interval_seconds = 3
+timeout_seconds = 5
+startup_grace_seconds = 30
+expected_first_boot_seconds = 600
+
+[resources]
+# ~8 GiB BF16 weights (~4 GiB FP8) plus image layers; deliberately light.
+min_free_disk_gib = 20
+min_free_memory_gib = 16
+gpu_required = true
+
+[env.EXTRA_ARGS]
+type = "string"
+default = ""
+description = "Free-form escape hatch appended after the baked-in serve flags for whichever variant is selected (both vllm's and llama-server's arg parsers take the last occurrence of a repeated flag, so this also overrides defaults above, e.g. '--max-model-len 32768' for bf16/fp8 or '-c 32768' for gguf)"

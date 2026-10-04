@@ -196,3 +196,28 @@ uv run mypy .
 ## License
 
 Apache License 2.0 — see [LICENSE](LICENSE).
+
+Launch batches are validated before models are stopped or launch records are written.
+Managed launch reservations and registry updates use process locks. State files use
+schema version 1; legacy registries migrate on their next write, and corrupt files
+are preserved and reported rather than overwritten.
+
+Startup failures return exit code 1. Ctrl-C returns 130, cancels provisioning and
+monitoring, and retains already launched containers and their handles for `status`
+and `stop`. Supervision does not continue after the CLI exits. An abrupt process
+kill can leave an active reservation; inspect and stop that launch before retrying.
+
+Manifest environment fields can declare `secret = true` to redact their values
+from command logs and streamed output. Credential passthrough fields are also
+redacted. Subprocesses have a one-hour default deadline; `RunContext.command_timeout`
+can customize it for programmatic launches. Cancellation terminates the subprocess
+group. External processes can still claim ports after allocation; bind failures
+are reported as startup failures rather than retried silently.
+
+For repeatable sources, set `[source].revision` to a Git commit. For deployment
+images, use `repository@sha256:digest` in `[docker].image` (or variant overrides).
+Run records capture the actual container image ID and repository commit when
+available. Existing mutable image tags remain compatible; their immutable IDs
+must be verified on the deployment host before updating built-in manifests.
+Built-in manifests ship in the wheel under `dgx_hub/builtin_plugins`; checkout
+`plugins/` paths point to the same authoritative resources.

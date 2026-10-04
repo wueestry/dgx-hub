@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
+import signal
 import subprocess
+import threading
 from collections import deque
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -40,6 +43,9 @@ def run_streaming(
     env: Mapping[str, str] | None = None,
     on_line: Callable[[str], None] | None = None,
     tail_lines: int = DEFAULT_TAIL_LINES,
+    timeout: float = 3600.0,
+    cancel_event: threading.Event | None = None,
+    secrets: Sequence[str] = (),
 ) -> StreamResult:
     """Run `argv`, logging each output line at INFO as `"<prefix>: <line>"` as
     it arrives (instead of only after exit), and calling `on_line` for it.
@@ -59,20 +65,58 @@ def run_streaming(
         text=True,
         errors="replace",
         bufsize=1,
+        start_new_session=True,
     )
+    done = threading.Event()
+    aborted: list[str] = []
+
+    def watchdog() -> None:
+        import time
+
+        deadline = time.monotonic() + timeout
+        while not done.wait(0.05):
+            if (cancel_event and cancel_event.is_set()) or time.monotonic() >= deadline:
+                reason = "cancelled" if cancel_event and cancel_event.is_set() else "timed out"
+                aborted.append(reason)
+                try:
+                    os.killpg(process.pid, signal.SIGTERM)
+                    if not done.wait(2):
+                        os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                return
+
+    watcher = threading.Thread(target=watchdog, daemon=True)
+    watcher.start()
     assert process.stdout is not None
     try:
         for raw in process.stdout:
             line = strip_ansi(raw.rstrip("\n")).rstrip()
+            for secret in secrets:
+                if secret:
+                    line = line.replace(secret, "<redacted>")
             if not line:
                 continue
             tail.append(line)
             logger.info("%s: %s", prefix, line)
             if on_line is not None:
                 on_line(line)
+    except BaseException:
+        if process.poll() is None:
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                os.killpg(process.pid, signal.SIGKILL)
+        raise
     finally:
         process.stdout.close()
         returncode = process.wait()
+        done.set()
+        watcher.join()
+    if aborted:
+        tail.append(f"Command {aborted[0]} (deadline: {timeout:g}s)")
+        returncode = returncode or 1
     return StreamResult(returncode=returncode, tail=list(tail))
 
 

@@ -1,0 +1,84 @@
+[plugin]
+name = "gpt-oss-120b"
+display_name = "GPT-OSS-120B (vLLM, MXFP4)"
+description = "vLLM server for OpenAI's gpt-oss-120b (117B total / 5.1B active MoE, native MXFP4 MoE weights), NVIDIA's DGX-Spark-optimized-models blog names this as running full precision on a single system"
+docs_url = "https://huggingface.co/openai/gpt-oss-120b"
+schema_version = 1
+
+# UNVERIFIED DRAFT -- not yet run on real DGX Spark hardware. Combines
+# OpenAI's minimal reference command with community-reported SM121
+# (GB10/Blackwell) fixes: MXFP4 requires the marlin backend (CUTLASS FP4
+# corrupts the first token), attention backend must be triton (FlashInfer's
+# SM121 path lacks attention sinks), and tool calls need the Harmony parser.
+# Confirm against a real boot before trusting; delete this note once verified.
+
+[source]
+repo_url = "https://huggingface.co/openai/gpt-oss-120b"
+
+# No [provision]/[[patch]]/[fallback]: `vllm serve` auto-downloads the
+# checkpoint, fully expressible via [docker] below like this repo's other
+# vllm-based plugins.
+
+[docker]
+mode = "docker-run"
+# Floating `nightly` tag, on the assumption it's most likely to carry both
+# aarch64/GB10 support and the MXFP4/marlin fixes above; pinned Docker Hub
+# vllm/vllm-openai tags are x86_64-only -- fall back to an NGC image (e.g.
+# nvcr.io/nvidia/vllm:26.02-py3, as nemotron-3-nano-4b uses) if this isn't multi-arch either.
+image = "vllm/vllm-openai:nightly"
+container_name = "gpt-oss-120b"
+network_mode = "bridge"
+gpus = "all"
+ipc = "host"
+volumes = ["dgx-hub-gpt-oss-120b-hf-cache:/root/.cache/huggingface"]
+env_passthrough = ["HF_TOKEN"]
+ports = [{ container_port = 8888, publish_strategy = "loopback-remap" }]
+# vllm/vllm-openai's image already sets ENTRYPOINT ["vllm", "serve"] -- command_args must NOT repeat it.
+command_args = [
+  "openai/gpt-oss-120b",
+  "--served-model-name", "gpt-oss-120b",
+  "--host", "0.0.0.0",
+  "--port", "8888",
+  "--tensor-parallel-size", "1",
+  "--quantization", "mxfp4",
+  "--attention-backend", "TRITON_ATTN",
+  "--gpu-memory-utilization", "0.85",
+  "--max-model-len", "131072",
+  "--max-num-seqs", "4",
+  "--async-scheduling",
+  "--enable-auto-tool-choice",
+  "--tool-call-parser", "openai",
+]
+
+[health]
+url = "http://{backend_address}/health"
+interval_seconds = 5
+timeout_seconds = 5
+startup_grace_seconds = 120
+expected_first_boot_seconds = 2400
+
+[resources]
+# ~65 GiB MXFP4 checkpoint plus KV cache/image layers; estimates pending a real boot.
+min_free_disk_gib = 90
+min_free_memory_gib = 90
+gpu_required = true
+
+[env.CONTEXT_LENGTH]
+type = "integer"
+default = 131072
+description = "Max context length (--max-model-len). 131072 is gpt-oss's native trained context"
+
+[env.GPU_MEM]
+type = "string"
+default = "0.85"
+description = "Fraction of the 128 GB unified pool for weights+KV (--gpu-memory-utilization). Unverified starting point -- lower it if boot OOMs, same pattern as qwen3.8-flash-next's GPU_MEM"
+
+[env.MAX_CONCURRENT_REQUESTS]
+type = "integer"
+default = 4
+description = "Max concurrent sequences (--max-num-seqs). Left conservative since weights alone are ~65 GiB of the 128 GB pool"
+
+[env.EXTRA_ARGS]
+type = "string"
+default = ""
+description = "Free-form escape hatch appended after the baked-in vllm serve flags (vLLM's argparse takes the last occurrence of a repeated flag, so this also overrides defaults above, e.g. '--gpu-memory-utilization 0.75')"

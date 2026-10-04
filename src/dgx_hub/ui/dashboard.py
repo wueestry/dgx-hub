@@ -49,9 +49,9 @@ def run_dashboard(
     """Render a live table until every supervisor reaches a terminal state.
 
     A long-booting model (up to a couple of hours for some plugins) simply
-    keeps this loop running — Ctrl-C leaves the containers running in the
-    background and just stops watching, since supervision only drives the
-    already-launched containers' visible status, not their lifetime.
+    keeps this loop running. Ctrl-C cancels provisioning and monitoring.
+    Containers already launched
+    retain their handles and continue running until explicitly stopped.
     """
     console = console or Console()
     try:
@@ -63,7 +63,8 @@ def run_dashboard(
                 time.sleep(poll_interval)
     except KeyboardInterrupt:
         console.print(
-            "[yellow]Interrupted — models continue running in the background. "
+            "[yellow]Interrupted — cancelling provisioning and monitoring; "
+            "launched containers are retained. "
             "Use `dgx-hub status` to check on them.[/yellow]"
         )
-        return
+        raise

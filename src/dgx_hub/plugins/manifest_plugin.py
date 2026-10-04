@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import shlex
+import subprocess
 from pathlib import Path
 
 import httpx
@@ -79,9 +80,7 @@ class ManifestPlugin:
             overrides = variant.docker_overrides
             if overrides.volumes and any("${REPO_DIR}" in v for v in overrides.volumes):
                 return True
-            if overrides.command_args and any(
-                "${REPO_DIR}" in a for a in overrides.command_args
-            ):
+            if overrides.command_args and any("${REPO_DIR}" in a for a in overrides.command_args):
                 return True
         return False
 
@@ -99,7 +98,33 @@ class ManifestPlugin:
             cwd=cwd,
             env=env,
             on_line=ctx.on_output if ctx is not None else None,
+            timeout=ctx.command_timeout if ctx else 3600,
+            cancel_event=ctx.cancel_event if ctx else None,
+            secrets=self._secrets(ctx),
         )
+
+    def _secrets(self, ctx: RunContext | None) -> list[str]:
+        values = ctx.env_values if ctx else {}
+        names = {name for name, spec in self.manifest.env.items() if spec.secret}
+        names.update(
+            name
+            for name in self.manifest.docker.env_passthrough
+            if any(word in name.upper() for word in ("TOKEN", "SECRET", "PASSWORD", "API_KEY"))
+        )
+        return [values.get(name, os.environ.get(name, "")) for name in names]
+
+    def _safe_command(self, argv: list[str], ctx: RunContext) -> str:
+        text = shlex.join(argv)
+        for secret in self._secrets(ctx):
+            if secret:
+                text = text.replace(secret, "<redacted>")
+        # Passthrough values may include credentials even without schema metadata.
+        for token in argv:
+            if "=" in token:
+                key, value = token.split("=", 1)
+                if any(word in key.upper() for word in ("TOKEN", "SECRET", "PASSWORD", "API_KEY")):
+                    text = text.replace(value, "<redacted>") if value else text
+        return text
 
     def _fail(self, what: str, result: StreamResult) -> ManifestPluginError:
         summary = failure_summary(result.tail)
@@ -122,7 +147,10 @@ class ManifestPlugin:
         [provision]/[fallback] scripts, which pull/update inside the clone
         themselves where that matters.
         """
-        if not self._repo_required() or self.repo_dir.exists():
+        if not self._repo_required():
+            return
+        if self.repo_dir.exists():
+            self._resolve_revision(ctx)
             return
         repo_url = self.manifest.source.repo_url
         logger.info("%s: cloning %s into %s", self.metadata.name, repo_url, self.repo_dir)
@@ -130,7 +158,32 @@ class ManifestPlugin:
         result = self._run(["git", "clone", "--depth", "1", repo_url, str(self.repo_dir)], ctx)
         if result.returncode != 0:
             raise self._fail(f"cloning {repo_url}", result)
+        self._resolve_revision(ctx)
         logger.info("%s: clone finished", self.metadata.name)
+
+    def _resolve_revision(self, ctx: RunContext | None) -> None:
+        revision = self.manifest.source.revision
+        if revision:
+            result = self._run(
+                ["git", "fetch", "--depth", "1", "origin", revision], ctx, cwd=self.repo_dir
+            )
+            if result.returncode:
+                raise self._fail("fetch source revision", result)
+            result = self._run(
+                ["git", "checkout", "--detach", "FETCH_HEAD"], ctx, cwd=self.repo_dir
+            )
+            if result.returncode:
+                raise self._fail("checkout source revision", result)
+        if ctx:
+            commit_result = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=self.repo_dir,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if commit_result.returncode == 0:
+                ctx.source_commit = commit_result.stdout.strip()
 
     def provision(self, ctx: RunContext) -> None:
         self._ensure_repo(ctx)
@@ -143,7 +196,7 @@ class ManifestPlugin:
         logger.info(
             "%s: provisioning: %s (cwd=%s)",
             self.metadata.name,
-            shlex.join(spec.command),
+            self._safe_command(spec.command, ctx),
             self.repo_dir,
         )
         result = self._run(spec.command, ctx, cwd=self.repo_dir)
@@ -178,7 +231,7 @@ class ManifestPlugin:
             allocated_port=ctx.allocated_port,
             repo_dir=self.repo_dir,
         )
-        logger.info("%s: starting: %s", self.metadata.name, shlex.join(built.argv))
+        logger.info("%s: starting: %s", self.metadata.name, self._safe_command(built.argv, ctx))
         result = self._run(built.argv, ctx)
         if result.returncode != 0:
             raise self._fail("docker run", result)
@@ -229,7 +282,7 @@ class ManifestPlugin:
                 raise self._fail("compose generation", gen_result)
 
         built = build_compose_up(docker_spec, ctx.env_values, ctx.allocated_port)
-        logger.info("%s: starting: %s", self.metadata.name, shlex.join(built.argv))
+        logger.info("%s: starting: %s", self.metadata.name, self._safe_command(built.argv, ctx))
         result = self._run(built.argv, ctx, cwd=self.repo_dir, env=built.env)
         if result.returncode != 0:
             raise self._fail("docker compose up", result)
@@ -265,9 +318,7 @@ class ManifestPlugin:
         if docker_spec.network_mode != NetworkMode.HOST:
             docker_adapter.ensure_network()
 
-        command = [
-            token.format(variant=ctx.variant_id or "") for token in spec.start_command
-        ]
+        command = [token.format(variant=ctx.variant_id or "") for token in spec.start_command]
 
         env = dict(os.environ)
         env.update(ctx.env_values)
@@ -278,7 +329,7 @@ class ManifestPlugin:
         logger.info(
             "%s: starting via fallback: %s (cwd=%s)",
             self.metadata.name,
-            shlex.join(command),
+            self._safe_command(command, ctx),
             self.repo_dir,
         )
         result = self._run(command, ctx, cwd=self.repo_dir, env=env)
