@@ -102,6 +102,69 @@ See `plugins/qwen3.8-27b-sglang/plugin.toml` for a complete example, and `.claud
 
 User-supplied plugins can also be dropped into dgx-hub's user config directory (platform-dependent, via `platformdirs`); built-in plugins win name collisions.
 
+### Qwen3.8 Flash Next with TensorFold
+
+The `qwen3.8-flash-next-tensorfold` plugin follows the
+[MiaAI-Lab TensorFold recipe](https://github.com/MiaAI-Lab/Qwen3.8-Flash-Next-Single-DGX-Spark-TensorFold),
+alongside the existing `qwen3.8-flash-next` vLLM plugin. It uses TensorFold
+v0.6.1 and the `Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP` checkpoint, with
+five streams, a 262144-token window per stream, int8 KV cache, SSD-offloaded
+PLE tables, and image/video input by default.
+
+```bash
+dgx-hub start qwen3.8-flash-next-tensorfold
+dgx-hub start qwen3.8-flash-next-tensorfold --set PARALLEL=4 --set CONTEXT=131072
+dgx-hub stop qwen3.8-flash-next-tensorfold
+```
+
+The first start pulls or builds the patched image, downloads the checkpoint,
+and compiles CUDA kernels. Plan for roughly 160 GiB of free disk and 103 GiB
+of available memory at the default settings, with no other managed GPU models
+running. Upstream also checks free space at the actual cache and image locations
+and validates the server's memory budget. It requires Docker with the NVIDIA
+container runtime (or a compatible `docker` command).
+
+DGX Hub adapts the server to join `dgx-hub-net` and publish its allocated port
+on host loopback, so it can be reached locally and through the gateway. The
+server binds to all interfaces inside its container. Clients use model id
+`Qwen3.8-Flash-Next` by default; change it with `--set SERVED_NAME=...`.
+For additional server flags, use `--set 'EXTRA_ARGS=...'`. Cache locations
+(`HF_CACHE`, `KERNEL_CACHE`) can be set in the host environment or the cloned
+repository's `.env`. Declared `--set` settings take precedence over that file.
+
+### Qwen3.8-27B with TensorFold
+
+The `qwen3.8-27b-tensorfold` plugin follows the
+[MiaAI-Lab 27B TensorFold recipe](https://github.com/MiaAI-Lab/Qwen3.8-27B-DGX-Spark-TensorFold).
+It uses TensorFold v0.6.0, the `Vontra/Qwen3.8-27B-MLX-4bit` checkpoint,
+and the `z-lab/Qwen3.8-27B-DFlash2` drafter. Defaults include eight streams,
+262144-token context, FP8 KV/prefill, a memory-sized pinned cache pool,
+and image/video input.
+
+```bash
+dgx-hub start qwen3.8-27b-tensorfold
+dgx-hub start qwen3.8-27b-tensorfold --set PARALLEL=4 --set KV_POOL_GB=40
+dgx-hub start qwen3.8-27b-tensorfold --set YARN_FACTOR=4
+dgx-hub start qwen3.8-27b-tensorfold --set DRAFT_ID= --set PREFILL_FP8=0
+dgx-hub stop qwen3.8-27b-tensorfold
+```
+
+`CONTEXT=0` (the plugin default) lets upstream derive the window from
+`YARN_FACTOR`, or read an explicit context from the cloned repository's `.env`.
+Set a positive `CONTEXT` to override it. `KV_POOL_GB=auto` sizes the pool
+from available memory, capped at 78 GiB; `0` disables pinning. Upstream's
+default memory reserve is 0 GiB; expose more host headroom with
+`--set TENSORFOLD_MEMORY_RESERVE_GIB=4` and reduce the pool if needed.
+
+The first launch prepares the image and both checkpoints and compiles CUDA
+kernels. The manifest requests 60 GiB free disk and 60 GiB available memory,
+and reserves the GPU exclusively among managed models. Actual memory usage
+depends on the cache pool; the default can hold about 97 GiB on a mostly idle
+Spark. Upstream performs the final memory admission check.
+
+Networking and cache configuration follow the Flash Next TensorFold plugin
+above. Clients use model id `Qwen3.8-27B` by default.
+
 ## Project layout
 
 ```
