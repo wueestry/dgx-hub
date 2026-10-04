@@ -221,3 +221,34 @@ available. Existing mutable image tags remain compatible; their immutable IDs
 must be verified on the deployment host before updating built-in manifests.
 Built-in manifests ship in the wheel under `dgx_hub/builtin_plugins`; checkout
 `plugins/` paths point to the same authoritative resources.
+
+## Cyber model derivatives
+
+`orcasaq-2-cyber-27b` uses the [OrcaSAQ2 GGUF checkpoint](https://huggingface.co/orcarouter/OrcaSAQ-2-Cyber-27B-Uncensored-GGUF)
+with Qwen3.8-27B's 131072-token context and sampling defaults. Its GGUF format
+requires llama.cpp instead of the SGLang/TensorFold base runtimes. It is text-only,
+with one slot by default; the context pool is shared when more slots are enabled.
+The gated checkpoint requires an HF token and accepted repository terms.
+
+```bash
+dgx-hub start orcasaq-2-cyber-27b
+dgx-hub start orcasaq-2-cyber-27b --set LLAMA_ARG_CTX_SIZE=65536 --set LLAMA_ARG_N_PARALLEL=2
+```
+
+`cyber-frost-3.8-nvfp4-v2` reuses the Qwen3.8-Flash-Next vLLM launcher,
+patches, PLE mmap, FP8 KV cache, and MTP defaults, with its own container and served
+model name. Provisioning and launch both select the Blackfrost V2 checkpoint.
+This is an experimental configuration: the [V2 model card](https://huggingface.co/Blackfrost-AI/CYBER-FROST-3.8-NVFP4-V2)
+lists 173.56 GiB of weights, with BF16 PLE and non-expert tensors, and no V2 inference
+qualification. The model card reports the predecessor running on one GB10 with patched vLLM
+and file-backed PLE offload. The 173.56 GiB disk payload does not establish resident
+memory requirements. The plugin retains the base launcher's 104 GiB free-memory
+preflight and requires 300 GiB free disk for weights and preparation; these are
+preflight thresholds, not measured V2 memory use. The launcher is a single-device
+path; V2 compatibility and resident memory still need qualification. `PLE_GIB=0` conservatively gives no offload credit;
+set it to the measured packed PLE table size after preparation. Runtime compatibility
+and memory use still require validation on suitable hardware.
+
+```bash
+dgx-hub start cyber-frost-3.8-nvfp4-v2
+```

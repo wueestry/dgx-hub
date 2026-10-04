@@ -1,0 +1,175 @@
+[plugin]
+name = "cyber-frost-3.8-nvfp4-v2"
+display_name = "Cyber-Frost 3.8 NVFP4 V2 (vLLM, Flash-Next)"
+description = "Cyber-Frost V2 using the Qwen3.8-Flash-Next vLLM launcher with PLE mmap and MTP. Experimental: 173.56 GiB on disk; predecessor ran on one GB10 with file-backed PLE offload. V2 runtime and resident memory remain unverified."
+docs_url = "https://huggingface.co/Blackfrost-AI/CYBER-FROST-3.8-NVFP4-V2"
+schema_version = 1
+
+[source]
+repo_url = "https://github.com/MiaAI-Lab/Qwen3.8-Flash-Next-Single-DGX-Spark.git"
+
+[provision]
+command = ["bash", "-c", "[[ -f .env ]] || cp .env.sample .env; if command -v uv >/dev/null; then exec uv run --no-project --with huggingface_hub ./download.sh; else exec ./download.sh; fi"]
+idempotent = true
+estimated_duration = "Checkpoint download (~174 GiB) plus image and packed PLE preparation; network-dependent"
+
+[[patch]]
+description = "start.sh: always re-extract the vLLM originals from the image"
+file = "start.sh"
+find = "    if [[ ! -f \"$2\" ]]; then\n        info \"Extracting $(basename \"$1\") from image...\"\n"
+replace = "    if true; then  # dgx-hub: always re-extract (a cached copy goes stale when the image changes)\n        info \"Extracting $(basename \"$1\") from image...\"\n"
+
+[[patch]]
+description = "start.sh: don't abort on the first launch's empty log archive"
+file = "start.sh"
+find = "ls -1t \"$SCRIPT_DIR\"/logs/archive/*-container.log 2>/dev/null | tail -n +21 | while read -r f; do"
+replace = "{ ls -1t \"$SCRIPT_DIR\"/logs/archive/*-container.log 2>/dev/null || true; } | tail -n +21 | while read -r f; do"
+
+[[patch]]
+description = "start.sh: keep the crash diagnostics when vLLM printed no exception"
+file = "start.sh"
+find = "| grep -viE \"min_frames|max_frames\" | tail -1 | cut -c1-400)"
+replace = "| grep -viE \"min_frames|max_frames\" | tail -1 | cut -c1-400 || true)"
+
+[[patch]]
+description = "start.sh: publish via bridge+-p instead of --network host"
+file = "start.sh"
+find = "    --gpus all --network host --ipc host \\\\\n"
+replace = "    --gpus all --network dgx-hub-net -p 127.0.0.1:$PORT:$PORT --ipc host \\\\\n"
+
+[docker]
+mode = "docker-run"
+image = "vllm/vllm-openai:qwen38-flash-next"
+container_name = "cyber-frost-3.8-nvfp4-v2"
+network_mode = "bridge"
+gpus = "all"
+ipc = "host"
+volumes = []
+env_passthrough = ["HF_TOKEN"]
+command_args = []
+
+[[docker.ports]]
+container_port = 8888
+publish_strategy = "loopback-remap"
+port_override_env_var = "PORT"
+
+[[variant]]
+id = "default"
+label = "Cyber-Frost V2 mixed NVFP4/BF16, native 262144 context, MTP=3 (experimental)"
+default = true
+
+[health]
+url = "http://{backend_address}/health"
+interval_seconds = 10
+timeout_seconds = 5
+startup_grace_seconds = 120
+expected_first_boot_seconds = 1800
+
+[resources]
+min_free_disk_gib = 300
+min_free_memory_gib = 104
+gpu_required = true
+exclusive_gpu = true
+
+[env.SERVED_MODEL_NAME]
+type = "string"
+default = "cyber-frost-3.8-nvfp4-v2"
+description = "Model id clients send as `model`"
+
+[env.TP1_MODEL_ID]
+type = "string"
+default = "Blackfrost-AI/CYBER-FROST-3.8-NVFP4-V2"
+description = "Checkpoint used by both download.sh and start.sh"
+
+[env.YARN]
+type = "enum"
+choices = ["0", "1"]
+default = "0"
+description = "0 = native rope, context capped at MAX_MODEL_LEN (<=262144). 1 = YaRN scaling, serves YARN_MAX_MODEL_LEN instead"
+
+[env.MAX_MODEL_LEN]
+type = "integer"
+default = 262144
+description = "Context length when YARN=0. Native ceiling is 262144"
+
+[env.YARN_MAX_MODEL_LEN]
+type = "integer"
+default = 524288
+description = "Context length when YARN=1 (ignored otherwise). Ceiling 524288; 1M does not fit"
+
+[env.MTP_NUM_SPECULATIVE_TOKENS]
+type = "integer"
+default = 3
+description = "MTP speculative tokens; 0 disables drafting. V2 preserves the BF16 source head; acceptance and memory use require measurement"
+
+[env.KV_CACHE_DTYPE]
+type = "enum"
+choices = ["fp8", "auto", "bfloat16"]
+default = "fp8"
+description = "fp8 = ~1.85x KV pool, enables long context, small quality/speed cost. auto/bfloat16 = BF16 KV"
+
+[env.KV_TARGET_GIB]
+type = "integer"
+default = 20
+description = "KV pool wish, GiB -- a wish, not a grant: capped at MemTotal - HOST_RESERVE_GIB. start.sh prints \"KV target X reduced to Y\" when the cap binds"
+
+[env.HOST_RESERVE_GIB]
+type = "integer"
+default = 30
+description = "Memory reserved for host and file-backed PLE; runtime budget is MemTotal minus this value"
+
+[env.MAX_NUM_SEQS]
+type = "integer"
+default = 4
+description = "Concurrent sequences. Raise for short-request throughput; the KV pool holds ~3.8x a full-length request at the default, so higher values trade against long-context concurrency. Pair values above 4 with a higher HOST_RESERVE_GIB (graph-capture memory spike)"
+
+[env.MAX_NUM_BATCHED_TOKENS]
+type = "integer"
+default = 2048
+description = "Prefill chunk width. Raising it (e.g. 8192) trades ~3% KV pool for ~11% prefill / ~10% TTFT"
+
+[env.MAMBA_SSM_CACHE_DTYPE]
+type = "enum"
+choices = ["bfloat16", "float32"]
+default = "bfloat16"
+description = "dtype of the GDN recurrent (SSM) state. bfloat16 halves the per-sequence state and mamba page vs. the checkpoint's native float32, at measured +6-8% decode with no accuracy loss"
+
+[env.MTP_DRAFT_VOCAB]
+type = "string"
+default = "files/draft_vocab_en_code_47k.txt"
+description = "Flash-Next reduced draft vocabulary; empty uses the full vocabulary. V2 performance is unverified"
+
+[env.CHAT_TEMPLATE]
+type = "string"
+default = ""
+description = "Host path (repo-relative) to a replacement Jinja chat template, bind-mounted read-only. Empty keeps the checkpoint's stock template"
+
+[env.BIND]
+type = "string"
+default = "0.0.0.0"
+description = "Interface the API binds to. 0.0.0.0 (every interface) is this repo's default for an unattended server; set 127.0.0.1 for loopback-only until API_KEY is set"
+
+[env.API_KEY]
+type = "string"
+default = ""
+description = "Bearer token for the OpenAI API (--api-key). Empty = no auth, and BIND=0.0.0.0 then exposes the model on every interface (start.sh warns at launch)"
+
+[env.EXTRA_VLLM_ARGS]
+type = "string"
+default = ""
+description = "Extra vllm serve flags, word-split with SHELL-WORD semantics (no embedded quotes). This repo's own free-form escape hatch"
+
+[env.EXTRA_DOCKER_ARGS]
+type = "string"
+default = "-e VLLM_USE_V2_MODEL_RUNNER=1"
+description = "Extra docker-run flags, appended verbatim. Default pins the V2 model runner on the MTP draft-model copy (fixes a FULL->PIECEWISE cudagraph_mode downgrade the repo measured without it) -- keep the default unless you know you don't need MTP"
+
+[env.PLE_GIB]
+type = "string"
+default = "0"
+description = "Conservative PLE budget credit, GiB. Set to the measured packed table size after preparation; stock Mia 26.82 GiB does not describe this BF16 PLE checkpoint"
+
+[fallback]
+enabled = true
+start_command = ["env", "TP1_CONTAINER_NAME=cyber-frost-3.8-nvfp4-v2", "./start.sh"]
+stop_command = ["env", "TP1_CONTAINER_NAME=cyber-frost-3.8-nvfp4-v2", "./stop.sh", "-f"]

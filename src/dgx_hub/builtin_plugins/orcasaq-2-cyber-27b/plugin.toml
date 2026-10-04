@@ -1,0 +1,60 @@
+[plugin]
+name = "orcasaq-2-cyber-27b"
+display_name = "OrcaSAQ-2 Cyber 27B Uncensored (GGUF)"
+description = "Qwen3.8-27B text-only derivative served with llama.cpp; 131072-token context and Qwen sampling defaults. GGUF requires llama.cpp rather than the base SGLang NVFP4 image."
+docs_url = "https://huggingface.co/orcarouter/OrcaSAQ-2-Cyber-27B-Uncensored-GGUF"
+schema_version = 1
+
+[source]
+repo_url = "https://huggingface.co/orcarouter/OrcaSAQ-2-Cyber-27B-Uncensored-GGUF"
+
+[docker]
+mode = "docker-run"
+image = "ghcr.io/ggml-org/llama.cpp:server-cuda"
+container_name = "orcasaq-2-cyber-27b"
+network_mode = "bridge"
+gpus = "all"
+volumes = ["dgx-hub-orcasaq-hf-cache:/root/.cache/huggingface"]
+env_passthrough = ["HF_TOKEN"]
+command_args = ["-hf", "orcarouter/OrcaSAQ-2-Cyber-27B-Uncensored-GGUF", "--host", "0.0.0.0", "--port", "8888", "--alias", "orcasaq-2-cyber-27b", "-ngl", "99", "--jinja", "--temp", "1.0", "--top-p", "0.95", "--top-k", "20"]
+ipc = "host"
+
+[[docker.ports]]
+container_port = 8888
+publish_strategy = "loopback-remap"
+
+[[variant]]
+id = "default"
+label = "OrcaSAQ2 mixed-precision GGUF, text only"
+default = true
+
+[health]
+url = "http://{backend_address}/health"
+interval_seconds = 2
+timeout_seconds = 5
+startup_grace_seconds = 45
+expected_first_boot_seconds = 1800
+
+[resources]
+min_free_disk_gib = 30
+min_free_memory_gib = 40
+gpu_required = true
+
+[env.EXTRA_ARGS]
+type = "string"
+default = ""
+description = "Extra llama-server flags, e.g. --ctx-size 65536"
+
+[[env.validation]]
+rule = "LLAMA_ARG_CTX_SIZE >= 1 and LLAMA_ARG_CTX_SIZE <= 262144 and LLAMA_ARG_N_PARALLEL >= 1"
+message = "Context must be between 1 and 262144; concurrency must be positive"
+
+[env.LLAMA_ARG_CTX_SIZE]
+type = "integer"
+default = 131072
+description = "Total llama.cpp context pool, shared across concurrent slots; native ceiling 262144"
+
+[env.LLAMA_ARG_N_PARALLEL]
+type = "integer"
+default = 1
+
